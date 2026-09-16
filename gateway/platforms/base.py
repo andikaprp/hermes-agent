@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from utils import normalize_proxy_url
 from agent.proxy_bypass import first_proxy_env_value, should_bypass_proxy as _should_bypass_proxy
+from gateway.delivery_voice import final_delivery_voice_check
 
 logger = logging.getLogger(__name__)
 
@@ -163,12 +164,16 @@ def _reply_anchor_for_event(event) -> str | None:
         # Slack reaction handoff = new top-level message; a message_id anchor would make
         # _resolve_thread_ts() reply in a nonexistent thread.
         return None
-    if platform == "telegram" and thread_id:
-        # Forum topics route by topic metadata (no reply); DM-topic lanes reply to the triggering
-        # message — replying to the topic seed/anchor can render outside the active lane.
-        if getattr(source, "chat_type", None) != "dm":
-            return None
-        return getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
+    if platform == "telegram":
+        # Ordinary Telegram turns are flat. A user-selected reply is deliberate context, so preserve
+        # its original anchor rather than replacing it with the latest bubble. Private DM topic lanes
+        # still need the live message anchor to remain in their routed topic; forum topics use metadata.
+        explicit_reply = getattr(event, "reply_to_message_id", None)
+        if explicit_reply:
+            return explicit_reply
+        if thread_id and getattr(source, "chat_type", None) == "dm":
+            return getattr(event, "message_id", None)
+        return None
     if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
         return getattr(event, "reply_to_message_id", None)
     return getattr(event, "message_id", None)
@@ -1691,6 +1696,12 @@ def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], sessi
         if merge_text and both_text:
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
+            latest_message_id = getattr(event, "message_id", None)
+            if latest_message_id is not None:
+                existing.message_id = str(latest_message_id)
+            explicit_reply = getattr(event, "reply_to_message_id", None)
+            if explicit_reply is not None:
+                existing.reply_to_message_id = str(explicit_reply)
             return
     pending_messages[session_key] = event
 
@@ -3463,17 +3474,23 @@ class BasePlatformAdapter(ABC):
         now = time.monotonic()
         if state is None:
             state = TextDebounceState(event=event, task=None, first_ts=now, last_ts=now)
+            # The turn runner uses this provenance to make a conversational Telegram burst a
+            # single regeneration boundary rather than recursively interrupting every bubble.
+            event._gateway_busy_text_debounced = True
             store[session_key] = state
         else:
             if event.text:
                 state.event.text = _append_text(state.event.text, event.text)
             latest_message_id = getattr(event, "message_id", None)
-            latest_anchor = latest_message_id or getattr(event, "reply_to_message_id", None)
             if latest_message_id is not None:
                 state.event.message_id = str(latest_message_id)
-            if latest_anchor is not None and hasattr(state.event, "reply_to_message_id"):
-                state.event.reply_to_message_id = str(latest_anchor)
+            # Keep a user-selected reply anchor, but never turn an ordinary later bubble into
+            # one. The latest message id still identifies the coalesced turn (and DM topic lane).
+            explicit_reply = getattr(event, "reply_to_message_id", None)
+            if explicit_reply is not None and hasattr(state.event, "reply_to_message_id"):
+                state.event.reply_to_message_id = str(explicit_reply)
             state.last_ts = now
+        event._gateway_accepted = True
         state.cancel_timer()
         delay = self._text_debounce_delay(session_key)
         state.task = asyncio.create_task(self._flush_text_debounce(session_key, delay))
@@ -3946,6 +3963,7 @@ class BasePlatformAdapter(ABC):
         Returns the result with the adapter that sent it: that adapter owns ``result.message_id``
         (an ephemeral delete must go to the same transport)."""
         delivery_adapter = self._final_delivery_adapter(event.source)
+        text_content = final_delivery_voice_check(text_content)
         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
                     len(text_content), event.source.chat_id)
         obligation_id = await self._record_delivery_obligation(

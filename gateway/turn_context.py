@@ -10,11 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional
 
+from gateway.turn_timing import TurnTiming, current_turn_timing
+
 
 @dataclass
 class TurnContext:
     # read-only turn identity / wiring
     source: Any = None
+    timing: TurnTiming = field(default_factory=current_turn_timing)
     _run_still_current: Callable[[], bool] = None  # type: ignore[assignment]
     _live_status_adapter: Any = None
     _live_status_mode: str = "off"

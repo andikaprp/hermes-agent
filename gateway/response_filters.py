@@ -12,7 +12,11 @@ from typing import Any
 # Exact whole-response markers meaning "the agent intentionally chose not to
 # reply". Keep small and explicit; arbitrary empty output remains an
 # error/empty-response path, not silence.
-LIVE_GATEWAY_SILENT_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"})
+LIVE_GATEWAY_SILENT_MARKERS = frozenset({
+    "[SILENT]", "SILENT", "NO_REPLY", "NO REPLY",
+    # Provider/runtime cancellation diagnostics are control-plane noise, not replies.
+    "[RESPONSE INTERRUPTED]",
+})
 
 # The persisted user-row kind of a self-injected MessageEvent(internal=True) turn — the only
 # machinery kind the gateway produces; only these may vanish on a bare silence marker.

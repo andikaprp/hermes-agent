@@ -83,8 +83,8 @@ def test_scoped_miss_does_not_leak_default_profile_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_set_reaction_calls_bot_api(monkeypatch):
-    """_set_reaction should call bot.set_message_reaction with correct args."""
+async def test_set_reaction_uses_native_bot_api_payload(monkeypatch):
+    """The Telegram fast path emits the native ``setMessageReaction`` payload."""
     monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
     adapter = _make_adapter()
 
@@ -96,6 +96,58 @@ async def test_set_reaction_calls_bot_api(monkeypatch):
         message_id=456,
         reaction="\U0001f440",
     )
+
+
+@pytest.mark.asyncio
+async def test_set_reaction_fails_closed_when_native_api_rejects(monkeypatch):
+    """A native reaction failure is cosmetic: report False and never raise."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    adapter = _make_adapter()
+    adapter._bot.set_message_reaction = AsyncMock(side_effect=RuntimeError("not permitted"))
+
+    assert await adapter._set_reaction("123", "456", "\U0001f440") is False
+
+
+@pytest.mark.asyncio
+async def test_set_reaction_fails_closed_on_unsupported_emoji(monkeypatch):
+    """Invalid/unsupported emoji is fail-closed, not a raised Bot API error."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    adapter = _make_adapter()
+    adapter._bot.set_message_reaction = AsyncMock(side_effect=RuntimeError("REACTION_INVALID"))
+
+    assert await adapter._set_reaction("123", "456", "not-an-emoji") is False
+    adapter._bot.set_message_reaction.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_add_reaction_succeeds_without_sending_text(monkeypatch):
+    """React-only: native set_message_reaction is enough; do not send a redundant text reply."""
+    adapter = _make_adapter()
+    adapter.send = AsyncMock()
+
+    result = await adapter.add_reaction("123", "\U0001f44d", message_id="456")
+
+    assert result == {"success": True, "message_id": "456"}
+    adapter._bot.set_message_reaction.assert_awaited_once_with(
+        chat_id=123,
+        message_id=456,
+        reaction="\U0001f44d",
+    )
+    adapter.send.assert_not_awaited()
+    adapter.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_reaction_fails_closed_and_does_not_send_text(monkeypatch):
+    """API rejection on the agent react path is fail-closed and never falls back to text."""
+    adapter = _make_adapter()
+    adapter.send = AsyncMock()
+    adapter._bot.set_message_reaction = AsyncMock(side_effect=RuntimeError("not permitted"))
+
+    result = await adapter.add_reaction("123", "\U0001f44d", message_id="456")
+
+    assert result["success"] is False
+    adapter.send.assert_not_called()
 
 
 # ── on_processing_start ──────────────────────────────────────────────
