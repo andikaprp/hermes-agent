@@ -153,7 +153,13 @@ def _authorize_relay_target(platform_name: str, chat_id, thread_id=None, *,
 
 def _handle_react(args, remove=False):
     """Attach (``remove=True``: retract) an emoji reaction via the live gateway adapter; no
-    standalone fallback because reacting needs the adapter's live message-id state."""
+    standalone fallback because reacting needs the adapter's live message-id state.
+
+    ``reaction_only=True`` claims the reaction stands in for the reply (no text will follow).
+    Only adapters that advertise ``supports_reaction_only_reply`` (Telegram) can judge that
+    claim, so elsewhere the flag is dropped rather than passed to a signature that would reject
+    it — the reaction itself behaves exactly as before.
+    """
     target, emoji = args.get("target", ""), (args.get("emoji") or "").strip()
     message_id = (args.get("message_id") or "").strip() or None
     if not target or (not remove and not emoji):
@@ -193,7 +199,12 @@ def _handle_react(args, remove=False):
         return tool_error(f"Platform '{platform_name}' does not support message reactions.")
     try:
         from model_tools import _run_async
-        result = _run_async(react_fn(chat_id=chat_id, message_id=message_id, **({} if remove else {"emoji": emoji})))
+        react_kwargs = {} if remove else {"emoji": emoji}
+        # A react-as-the-reply claim is only meaningful where the adapter can judge it against
+        # the inbound message; passed blindly it would be a TypeError on every other platform.
+        if not remove and args.get("reaction_only") and getattr(adapter, "supports_reaction_only_reply", False):
+            react_kwargs["stand_in_for_reply"] = True
+        result = _run_async(react_fn(chat_id=chat_id, message_id=message_id, **react_kwargs))
     except Exception as e:
         return json.dumps(_error(f"Reaction failed: {e}"))
     return json.dumps(result if isinstance(result, dict) else {"success": bool(result)})
@@ -685,6 +696,10 @@ SEND_MESSAGE_SCHEMA = {
             "message_id": {
                 "type": "string",
                 "description": "For action='react'/'unreact': id of the message to react to. Omit to target the most recent message received in that chat (usually the one being replied to)."
+            },
+            "reaction_only": {
+                "type": "boolean",
+                "description": "For action='react': claim this reaction IS your whole reply, so you send no text. Only for a purely social message — a greeting, thanks, praise, affection, a joke, or an acknowledgement. The claim is refused (result carries text_required: true) whenever the message asks anything, is a work or status report, needs verification or a next step, or involves money, credentials, deletion, or a deploy; send text then. Requires a reaction-aware platform (Telegram); ignored elsewhere."
             }
         },
         "required": []

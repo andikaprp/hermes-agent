@@ -32,6 +32,13 @@ from gateway.telegram_reaction_receipt import (
     PHASE_START,
     TelegramReactionReceipt,
 )
+from gateway.telegram_reaction_style import (
+    decide_reaction_only,
+    failure_reaction,
+    normalize_style,
+    start_reaction,
+    success_reaction,
+)
 
 
 def _redact_telegram_error_text(error: object) -> str:
@@ -6619,6 +6626,14 @@ class TelegramAdapter(BasePlatformAdapter):
 
     # -- Message reactions (processing lifecycle) --
 
+    # Inbound texts remembered per chat for the reaction-only guard (see ``add_reaction``).
+    # Small on purpose: one short string per recently active chat, oldest evicted first.
+    REACTION_INBOUND_MEMORY = 64
+
+    # Advertised to callers (``tools/send_message_tool.py``) so a react-as-the-reply claim can
+    # be recognized instead of silently ignored on platforms without the guard.
+    supports_reaction_only_reply = True
+
     def _reactions_enabled(self) -> bool:
         """Reactions: scoped ``TELEGRAM_REACTIONS`` → ``extra.reactions`` (YAML, per profile) → off.
 
@@ -6630,6 +6645,52 @@ class TelegramAdapter(BasePlatformAdapter):
         if configured is None:
             return False
         return str(configured).lower() not in {"false", "0", "no"}
+
+    def _reaction_style(self) -> str:
+        """Reaction policy: scoped ``TELEGRAM_REACTION_STYLE`` → ``extra.reaction_style`` → default.
+
+        ``lifecycle`` (default) is the glyph pair this adapter always sent; ``content`` adds the
+        tone-matched glyph on purely social messages and the guarded reaction-only reply. An
+        unknown value normalizes to the default, so a typo cannot restyle every reaction.
+        """
+        configured = _extra_or_secret(self.config.extra, "reaction_style", "TELEGRAM_REACTION_STYLE", None)
+        return normalize_style(configured)
+
+    @staticmethod
+    def _reaction_content(event: MessageEvent) -> str:
+        """Inbound text the tone classifier reads. Total: missing or hostile text → ``""``."""
+        try:
+            return str(getattr(event, "text", None) or "")
+        except Exception:
+            return ""
+
+    def _remember_inbound_text(self, chat_id: Any, text: Any) -> None:
+        """Remember the inbound text per chat so a react-only reply can be judged later.
+
+        ``add_reaction`` receives a message id, not the text, and the guard has to read the
+        message being replied to — so the lifecycle hook stashes it here. Lazily created because
+        adapters are also built with ``object.__new__`` in tests.
+        """
+        try:
+            key = str(chat_id)
+        except Exception:
+            return
+        store = getattr(self, "_reaction_inbound_text", None)
+        if not isinstance(store, dict):
+            store = {}
+            self._reaction_inbound_text = store
+        store.pop(key, None)
+        store[key] = text if isinstance(text, str) else ""
+        while len(store) > self.REACTION_INBOUND_MEMORY:
+            store.pop(next(iter(store)), None)
+
+    def _inbound_text(self, chat_id: Any) -> str:
+        """Last inbound text seen for ``chat_id`` (``""`` when unknown) — never raises."""
+        try:
+            store = getattr(self, "_reaction_inbound_text", None) or {}
+            return store.get(str(chat_id), "") or ""
+        except Exception:
+            return ""
 
     def _build_reaction_receipt(self, chat_id: Any, message_id: Any, emoji: Optional[str],
                                 phase: str) -> Optional[TelegramReactionReceipt]:
@@ -6673,16 +6734,42 @@ class TelegramAdapter(BasePlatformAdapter):
         """Clear all bot-set reactions."""
         return await self._set_reaction(chat_id, message_id, None, phase=phase)
 
-    async def add_reaction(self, chat_id: str, emoji: str, message_id: Optional[str] = None) -> Dict[str, Any]:
+    async def add_reaction(self, chat_id: str, emoji: str, message_id: Optional[str] = None, *,
+                           stand_in_for_reply: bool = False,
+                           content: Optional[str] = None) -> Dict[str, Any]:
         """Native tapback via ``setMessageReaction``. Deliberate agent intent — not gated by TELEGRAM_REACTIONS.
 
         A reaction can be the whole reply: this path never sends text. Fail-closed (never raises).
+
+        ``stand_in_for_reply=True`` claims the reaction IS the reply — the only sanctioned way to
+        leave a chat unspoken to. The claim is judged by
+        ``gateway.telegram_reaction_style.decide_reaction_only`` against the inbound message
+        (``content``, else the text this adapter last saw for ``chat_id``): the reaction still
+        goes out, and the result then carries ``reaction_only``/``text_required`` plus the
+        machine-readable reason, so a caller never mistakes a refused claim for silence.
         """
         if not message_id:
             return {"success": False, "error": "no message to react to — pass message_id"}
+        verdict = None
+        if stand_in_for_reply:
+            verdict = decide_reaction_only(
+                self._inbound_text(chat_id) if content is None else content,
+                style=self._reaction_style())
         if not await self._set_reaction(chat_id, message_id, emoji):
             return {"success": False, "error": "telegram set_message_reaction failed"}
-        return {"success": True, "message_id": str(message_id)}
+        result: Dict[str, Any] = {"success": True, "message_id": str(message_id)}
+        if verdict is not None:
+            result.update({
+                "reaction_only": verdict.allowed,
+                "text_required": verdict.text_required,
+                "reason": verdict.reason,
+                "tone": verdict.tone,
+                "job": verdict.job,
+            })
+            if verdict.text_required:
+                logger.debug(
+                    "[%s] reaction-only reply refused (%s): text is required", self.name, verdict.reason)
+        return result
 
     async def remove_reaction(self, chat_id: str, message_id: Optional[str] = None) -> Dict[str, Any]:
         """Clear bot-set reactions on a message. Fail-closed; never sends text."""
@@ -6699,11 +6786,20 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
         if chat_id and message_id:
-            await self._set_reaction(chat_id, message_id, "\U0001f440", phase=PHASE_START)
+            content = self._reaction_content(event)
+            self._remember_inbound_text(chat_id, content)
+            await self._set_reaction(
+                chat_id, message_id, start_reaction(self._reaction_style(), content),
+                phase=PHASE_START)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Swap the in-progress reaction for a final success/failure reaction (set_message_reaction
-        replaces, not adds); CANCELLED explicitly clears the 👀."""
+        replaces, not adds); CANCELLED explicitly clears the 👀.
+
+        The success glyph is the only content-aware slot: the tone glyph on a purely social
+        message under the content style, the receipt done-glyph everywhere else. Failure stays
+        👎 — an outcome, never a tone.
+        """
         if not self._reactions_enabled():
             return
         chat_id = getattr(event.source, "chat_id", None)
@@ -6713,7 +6809,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if outcome == ProcessingOutcome.CANCELLED:
             await self._clear_reactions(chat_id, message_id, phase=PHASE_CANCELLED)
         else:
-            await self._set_reaction(chat_id, message_id, "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e", phase=PHASE_COMPLETE)
+            style = self._reaction_style()
+            content = self._reaction_content(event)
+            emoji = (success_reaction(style, content) if outcome == ProcessingOutcome.SUCCESS
+                     else failure_reaction(style, content))
+            await self._set_reaction(chat_id, message_id, emoji, phase=PHASE_COMPLETE)
 
 
 # -- Plugin registration glue: register(ctx) plus the hook implementations (adapter factory, YAML→env/extra
@@ -6835,6 +6935,7 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
         ("ignored_threads", "TELEGRAM_IGNORED_THREADS", True)):
         _bridge_gate(key, env, telegram_cfg.get(key), seed_extra=seed)
     _bridge_lower("reactions", "TELEGRAM_REACTIONS")
+    _bridge_lower("reaction_style", "TELEGRAM_REACTION_STYLE")
     if "proxy_url" in telegram_cfg:
         # Seeded into extra so ``_build_ptb_requests`` keeps a secondary's route without the env bridge.
         extras.setdefault("proxy_url", str(telegram_cfg["proxy_url"]).strip())
