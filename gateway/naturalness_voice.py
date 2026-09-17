@@ -132,7 +132,12 @@ _LIVE_EVIDENCE = re.compile(
     re.I,
 )
 
-_MAX_FIRST_SENTENCE_WORDS = 28
+# A line that renders as structure rather than prose. What hides an answer is a header,
+# fence, table row, bullet or bold label sitting ahead of the first prose line, not how long
+# the answer's first sentence happens to be.
+_STRUCTURE_LINE = re.compile(
+    r"^\s*(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||```|~~~|\*\*[^*]+\*\*\s*:?\s*$)"
+)
 
 
 @dataclass(frozen=True)
@@ -142,10 +147,6 @@ class Finding:
 
     def __str__(self) -> str:  # pragma: no cover - display only
         return f"{self.code}: {self.detail}"
-
-
-def _sentences(text: str) -> list[str]:
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
 
 
 def _structure_hits(text: str) -> list[str]:
@@ -192,12 +193,24 @@ def audit_voice(
         findings.append(Finding("process_narration", repr(narration.group(0).strip())))
 
     first_line = next((ln for ln in stripped.splitlines() if ln.strip()), "")
-    sentences = _sentences(stripped)
-    first = sentences[0] if sentences else ""
-    if _META_LEAD.match(first_line.strip()) or _structure_hits(first_line):
-        findings.append(Finding("buried_answer", "leads with meta or structure"))
-    elif register == REGISTER_CHAT and len(first.split()) > _MAX_FIRST_SENTENCE_WORDS:
-        findings.append(Finding("buried_answer", f"first sentence is {len(first.split())} words"))
+    # A buried answer is hidden behind structure or a meta opener, not merely long. Sentence
+    # length is deliberately NOT a trigger: a direct answer written as one long sentence is
+    # the standard working, and flagging it was a false accusation on a good reply.
+    leading_structure = []
+    first_prose = ""
+    for line in stripped.splitlines():
+        if not line.strip():
+            continue
+        if _STRUCTURE_LINE.match(line):
+            leading_structure.append(line.strip())
+            continue
+        first_prose = line.strip()
+        break
+    if leading_structure:
+        findings.append(Finding("buried_answer",
+                                "structure before the answer: " + repr(leading_structure[0][:40])))
+    elif _META_LEAD.match(first_prose or first_line.strip()):
+        findings.append(Finding("buried_answer", "meta opener before the answer"))
 
     filler = _FILLER_QUESTION.search(stripped)
     if filler and not _EXPENSIVE.search(stripped):
