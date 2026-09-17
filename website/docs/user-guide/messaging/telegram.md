@@ -1011,7 +1011,7 @@ gateway:
     fast_path: false
 ```
 
-A missing key is still enabled: the gateway reads `config.yaml` with no default-config merge, so absence is not an opt-out. Groups, quoted replies, media, slash commands, and anything that isn't a bare ack/greeting stay on the full loop. `done` is excluded deliberately — it usually reports a finished step and expects the next one.
+A missing key is still enabled: the gateway reads `config.yaml` with no default-config merge, so absence is not an opt-out. Groups, quoted replies, media, slash commands, URLs, bracketed system notices, messages that carry an object or an action verb, and questions that need the world or some named state stay on the full loop. `done` is excluded deliberately — it usually reports a finished step and expects the next one. `gateway.telegram.fast_path` is the on/off gate; the classifier does not grow its acknowledgement list to chase recall.
 
 ## Rendering: Rich Messages, Tables and Link Previews
 

@@ -13,6 +13,7 @@ from gateway.run_turn_fast_path import (
     FAST_PATH_NOTE,
     FAST_PATH_OUTCOME_MARKER,
     _ACK_WORDS,
+    _ACTION_VERBS,
     _DIRECTIVE_WORDS,
     apply_fast_path_note,
     classify_fast_path,
@@ -126,6 +127,77 @@ def test_real_tasks_never_take_the_fast_path(text):
     assert classify_fast_path(text, history=ASSISTANT_STATED) is None
 
 
+# ── structural guards: shape, not a word list ─────────────────────────────
+# Each case is a *shape* a first-token ack lexicon would misroute. None of
+# these strings are the review corpus; a fix that only special-cases those
+# literals will fail a fresh set of the same shapes.
+
+
+@pytest.mark.parametrize("text", [
+    "yeah ship the release",          # ack + object, no listed action verb
+    "sure, publish the notes",        # punctuation between ack and object
+    "oke lanjutkan",                  # Indonesian ack + attached verb
+    "go ahead then",                  # directive phrase + extra token
+    "yep, once you finish",           # ack + clause
+])
+def test_an_ack_with_an_object_is_a_command(text):
+    """``yes`` is an ack. ``yes <anything>`` is an order. No history needed."""
+    for history in (None, ASSISTANT_STATED, ASSISTANT_ASKED):
+        assert classify_fast_path(text, history=history) is None
+
+
+@pytest.mark.parametrize("text", [
+    "commit the staged files",
+    "review the latest diff",
+    "install the missing wheel",
+    "please build a fresh image",
+    "kindly delete the stale branch",
+])
+def test_an_action_verb_is_never_ordinary(text):
+    """Independent of the ack list: a verb of action is a command."""
+    assert classify_fast_path(text, history=ASSISTANT_STATED) is None
+    assert classify_fast_path(text, history=None) is None
+
+
+@pytest.mark.parametrize("text", [
+    "https://github.com/nousresearch/hermes-agent/pull/1",
+    "www.example.org/status",
+    "see https://example.com/a/b and say hi",
+])
+def test_a_url_is_never_ordinary(text):
+    assert classify_fast_path(text, history=ASSISTANT_STATED) is None
+
+
+@pytest.mark.parametrize("text", [
+    "[CRON COMPLETE] inspect the logs",
+    "[WATCHDOG: child exited] send the summary",
+    "[ok]",  # stripping [] must not recover a bare ack
+])
+def test_a_bracketed_system_prefix_is_never_ordinary(text):
+    assert classify_fast_path(text, history=ASSISTANT_STATED) is None
+    assert classify_fast_path(text, history=None) is None
+
+
+@pytest.mark.parametrize("text", [
+    "what time is it in Lisbon",
+    "how's the rollout going",
+    "why did the job fail",
+    "can you look at the leftover invoices",
+])
+def test_a_consultative_question_stays_on_the_full_loop(text):
+    """Needs the world or named state. ``ok?`` is decoration, not this."""
+    assert classify_fast_path(text, history=ASSISTANT_STATED) is None
+    assert classify_fast_path("ok?", history=ASSISTANT_STATED) == "ack"
+
+
+def test_proposal_context_still_blocks_a_bare_ack():
+    """Re-check: even without an object, a yes to 'shall I …?' keeps its tools."""
+    assert classify_fast_path("yes", history=ASSISTANT_ASKED) is None
+    assert classify_fast_path("oke", history=ASSISTANT_ASKED) is None
+    # And an ack+object is out even when the assistant proposed nothing.
+    assert classify_fast_path("sure publish it", history=ASSISTANT_STATED) is None
+
+
 def test_slash_commands_never_take_the_fast_path():
     """``is_trivial_prompt`` calls these trivial; for routing they are commands."""
     for text in ("/stop", "/new", "/status"):
@@ -192,6 +264,8 @@ def test_social_path_still_requires_the_trivial_prompt_judgement():
 
 def test_directive_and_ack_lexicons_do_not_overlap():
     assert not (_DIRECTIVE_WORDS & _ACK_WORDS)
+    assert not (_ACTION_VERBS & _ACK_WORDS)
+    assert not (_ACTION_VERBS & _DIRECTIVE_WORDS)
 
 
 # ── the note ──────────────────────────────────────────────────────────────

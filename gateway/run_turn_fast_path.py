@@ -22,29 +22,35 @@ injection.
 turn degrades to "the model ignored a hint", never to "the work was silently dropped". The
 note says so explicitly, which is the fall-through-and-say-so escape hatch.
 
-The gate is deliberately narrower than the thing it reuses. Eligibility requires
-``agent.memory_provider.is_trivial_prompt`` — the shipped single source of truth for "this
-prompt carries no semantic signal", already trusted to skip memory recall — and then removes
-from it everything that could be an instruction to act:
+The gate is structural, then lexical — never the other way around. A longer ack list cannot
+tell ``yes`` from ``yes merge it``: both start with the same word. Eligibility is therefore
+a sequence of fail-closed shape checks, and only a message that survives every one of them
+may consult the frozen ack/social lexicons:
 
-* directive words (``continue``, ``do it``, ``proceed``, ``done``, ...) are never eligible.
+* a URL is never ordinary;
+* a bracketed or tagged prefix (``[ASYNC …]``, ``[IMPORTANT: …]``) is a machine work
+  trigger, never ordinary. Detected on the raw text, before any punctuation strip, because
+  stripping ``[]`` would turn ``[ok]`` into an ack;
+* an action verb (merge, run, restart, fix, upgrade, …) anywhere means the message is a
+  command, regardless of any ack word sitting next to it;
+* an ack/directive/social phrase with anything attached — a verb, a noun, a target — is a
+  command. ``yes`` has no object; ``yes, patch it`` does;
+* a question that has to consult the world or some named state (``what time is it in …``,
+  ``how is it going with the …``) is never ordinary. A trailing ``?`` on a known bare phrase
+  (``ok?``) is decoration, not a question;
+* directive words (``continue``, ``do it``, ``proceed``, ``done``, …) are never eligible.
   ``done`` is deliberate: a user reporting a finished step usually expects the next one;
-* ack words (``yes``, ``ok``, ``ya``, ``oke``, ...) are eligible only when the assistant's last
-  message did not propose or ask for anything, because there an ack IS a go-ahead;
-* slash commands are never eligible;
-* anything that is not a plain string (native multimodal content) is never eligible.
+* a surviving ack word is eligible only when the assistant's last message did not propose
+  or ask for anything, because there an ack IS a go-ahead;
+* slash commands and native multimodal content are never eligible.
 
-Ack words may reach past ``is_trivial_prompt``. That regex is English-only, and the most
-common acknowledgement from this deployment's primary user is Indonesian ``ya`` / ``oke`` /
-``okey`` — single-token, indistinguishable from yes/ok, and exactly the 3x-cost failure
-LAB-3 measured when they entered the full loop. Social (non-ack) turns still require the
-trivial-prompt judgement. Ambiguous probes (``test``, ``this``, ``ping``) stay off: they
-may be a liveness check or the start of a task, and the fall-through note is not a
-substitute for knowing which.
+Do not extend ``_ACK_WORDS`` to chase recall. Ambiguous probes (``test``, ``this``,
+``ping``) stay off. Ack words may reach past ``is_trivial_prompt`` (that regex is
+English-only; this deployment's primary user sends ``ya`` / ``oke`` / ``okey``). Social
+(non-ack) turns still require the trivial-prompt judgement.
 
 Media, quoted replies and group sender prefixes need no separate guard: inbound preprocessing
-folds each of them into the message text as a note, and ``TRIVIAL_PROMPT_RE`` is anchored, so
-a turn carrying any of them simply stops matching.
+folds each of them into the message text as a note, and a leading ``[`` is already rejected.
 """
 
 from __future__ import annotations
@@ -77,16 +83,43 @@ _DM_CHAT_TYPES = frozenset({"dm", "private"})
 # onto the fast path — that is a measured, deliberate exclusion (see the test of the same name).
 _DIRECTIVE_WORDS = frozenset({"continue", "go ahead", "do it", "proceed", "next", "done"})
 
-# Acknowledgements that are an approval only in context. Safe alone; a go-ahead when the
+# Acknowledgements that are an approval only in context. Safe ALONE; a go-ahead when the
 # assistant just proposed something, which ``_ASSISTANT_PROPOSED_RE`` detects.
-# ``ya`` / ``oke`` / ``okey`` / ``iya`` are Indonesian (and mixed-ID/EN) equivalents of yes/ok —
-# this deployment's primary user sends them more than the English forms. They are not in
-# ``TRIVIAL_PROMPT_RE`` (English-only); the classifier matches them via this set directly.
+# Frozen. Do not add words here to chase ordinary-recall — ``yes`` and ``yes merge it``
+# share the same first token, and a longer list cannot tell them apart.
+# ``ya`` / ``oke`` / ``okey`` / ``iya`` are Indonesian (and mixed-ID/EN) equivalents of yes/ok;
+# they are not in ``TRIVIAL_PROMPT_RE`` (English-only) and match via this set directly.
 _ACK_WORDS = frozenset({
     "yes", "y", "yep", "yup", "yeah", "ok", "okay", "oke", "okey", "k", "sure",
     "no", "n", "nope", "nah", "ya", "iya",
     "got it", "lgtm", "fine", "good", "not really",
 })
+
+# Imperative verbs of action. Independent of the ack list: a message that contains one of
+# these as a whole word is a command even if it also contains ``yes`` / ``ok``.
+_ACTION_VERBS = frozenset({
+    "merge", "run", "restart", "fix", "upgrade", "deploy", "build", "check",
+    "summarize", "update", "delete", "install", "commit", "push", "review", "report",
+})
+_ACTION_VERB_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(re.escape(v) for v in _ACTION_VERBS)) + r")\b",
+    re.IGNORECASE,
+)
+
+_URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
+
+# Machine-generated work triggers arrive as a leading [tag] (delegation batches, cron
+# completions, background-process notices). Must run on the raw text: ``_TRAILING``
+# contains ``[]``, so a later strip would turn ``[ok]`` into an ack.
+_SYSTEM_PREFIX_RE = re.compile(r"^\[")
+
+# Question-words. Auxiliaries (do/is/are) are omitted: ``do it`` is an imperative, and a
+# message that is not a known bare phrase already falls through to the full loop.
+_INTERROGATIVE_RE = re.compile(
+    r"^(what|what's|whats|why|how|how's|hows|when|where|who|which|"
+    r"can|could|would|should)\b",
+    re.IGNORECASE,
+)
 
 # The assistant's last message invited an action, so an ack answers it.
 _ASSISTANT_PROPOSED_RE = re.compile(
@@ -114,6 +147,49 @@ FAST_PATH_NOTE = (
 def _bare_word(text: str) -> str:
     """The lexicon key for *text*: decoration stripped, trailing elongation collapsed."""
     return _ELONGATED_TAIL.sub(r"\1", text.strip().strip(_TRAILING).lower())
+
+
+def _tokens(text: str) -> list[str]:
+    """Whitespace tokens with per-token decoration and trailing elongation removed."""
+    out: list[str] = []
+    for raw in text.split():
+        tok = _ELONGATED_TAIL.sub(r"\1", raw.strip(_TRAILING).lower())
+        if tok:
+            out.append(tok)
+    return out
+
+
+def _known_leading_len(tokens: Sequence[str]) -> int:
+    """Longest leading ack / directive / trivial phrase length, else 0."""
+    max_n = min(3, len(tokens))
+    for n in range(max_n, 0, -1):
+        phrase = " ".join(tokens[:n])
+        if phrase in _ACK_WORDS or phrase in _DIRECTIVE_WORDS or is_trivial_prompt(phrase):
+            return n
+    return 0
+
+
+def _has_attached_object(tokens: Sequence[str]) -> bool:
+    """True when a known bare phrase is followed by any extra token.
+
+    ``yes`` is an acknowledgement. ``yes merge it`` is an order. The two are made of
+    the same ack word; the extra token is the object that makes it a command.
+    """
+    n = _known_leading_len(tokens)
+    return n > 0 and len(tokens) > n
+
+
+def _is_consultative(stripped: str, tokens: Sequence[str]) -> bool:
+    """World/state questions stay on the full loop; ``ok?`` is just a decorated ack."""
+    phrase = " ".join(tokens)
+    if (
+        phrase in _ACK_WORDS
+        or phrase in _DIRECTIVE_WORDS
+        or is_trivial_prompt(stripped)
+        or is_trivial_prompt(phrase)
+    ):
+        return False
+    return bool(_INTERROGATIVE_RE.match(stripped) or "?" in stripped)
 
 
 def _assistant_proposed(history: Optional[Sequence[Any]]) -> bool:
@@ -171,14 +247,23 @@ def classify_fast_path(
     stripped = message.strip()
     if not stripped or stripped.startswith("/"):
         return None
-    word = _bare_word(stripped)
-    if word in _DIRECTIVE_WORDS:
+    # Shape checks first — the lexicon never sees a URL, a tagged prefix, a verb of
+    # action, an ack-with-object, or a consultative question.
+    if _URL_RE.search(stripped) or _SYSTEM_PREFIX_RE.match(stripped):
         return None
-    if word in _ACK_WORDS:
+    if _ACTION_VERB_RE.search(stripped):
+        return None
+    tokens = _tokens(stripped)
+    if not tokens or _has_attached_object(tokens) or _is_consultative(stripped, tokens):
+        return None
+    phrase = " ".join(tokens)
+    if phrase in _DIRECTIVE_WORDS:
+        return None
+    if phrase in _ACK_WORDS:
         return None if _assistant_proposed(history) else "ack"
-    if not (is_trivial_prompt(stripped) or is_trivial_prompt(word)):
-        return None
-    return "social"
+    if is_trivial_prompt(stripped) or is_trivial_prompt(phrase):
+        return "social"
+    return None
 
 
 def fast_path_reason(
