@@ -306,6 +306,21 @@ def is_fast_path_enabled(user_config: Any = None) -> bool:
         return True
 
 
+def _strip_leading_message_timestamp(text: str) -> str:
+    """Drop a leading gateway timestamp render, if any, before judging shape.
+
+    Reuses the helper that already keeps the persisted transcript clean, so the timestamp
+    format lives in one place. Never raises: a classifier must not fail a turn.
+    """
+    try:
+        from gateway.message_timestamps import strip_leading_message_timestamps
+
+        cleaned, _embedded_epoch = strip_leading_message_timestamps(text)
+        return cleaned.strip() or text
+    except Exception:
+        return text
+
+
 def classify_fast_path(
     message: Any, *, history: Optional[Sequence[Any]] = None,
 ) -> Optional[str]:
@@ -316,6 +331,16 @@ def classify_fast_path(
     if not isinstance(message, str):
         return None  # native multimodal content
     stripped = message.strip()
+    if not stripped:
+        return None
+    # Production renders every inbound user message with a leading timestamp
+    # (``gateway.message_timestamps.enabled`` is on for this deployment), so what arrives here
+    # is ``[Thu 2026-09-17 21:54:28 WIB] hi``. That leading ``[`` is indistinguishable from a
+    # machine work trigger below, and the result was that *every* live message classified as
+    # not-ordinary and the fast path never fired, while every test — which passes a clean
+    # string — passed. Judge the user's text, not the render: strip only the known timestamp
+    # shape, so a real ``[ASYNC …]`` / ``[IMPORTANT: …]`` notice is still rejected.
+    stripped = _strip_leading_message_timestamp(stripped)
     if not stripped or stripped.startswith("/"):
         return None
     # Shape checks first — the lexicon never sees a URL, a tagged prefix, a verb of
