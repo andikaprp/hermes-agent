@@ -24,6 +24,26 @@ from gateway.platforms._shared import (
     platform_gate_env as _scoped_gate_env,
 )
 
+try:  # never let a formatting helper break a send: identity is the safe fallback
+    from gateway.delivery_voice import normalize_stream_dashes as _normalize_stream_dashes
+except Exception:  # pragma: no cover - delivery_voice imports only `re`; defensive
+    def _normalize_stream_dashes(text: str) -> str:  # type: ignore[misc]
+        return text
+
+
+def _dash_safe_draft_text(content: str) -> str:
+    """Dash-normalize one streamed draft frame; ANY failure sends it unchanged.
+
+    A formatting helper must never delay, reorder or drop a frame (mirrors the
+    swallow-don't-fail discipline of gateway/naturalness_voice.py).
+    """
+    try:
+        return _normalize_stream_dashes(content)
+    except Exception:
+        logger.debug("Draft dash normalization failed; sending the frame unchanged",
+                     exc_info=True)
+        return content
+
 
 def _redact_telegram_error_text(error: object) -> str:
     """Redact secrets from Telegram transport errors before logging or returning them."""
@@ -3774,6 +3794,10 @@ class TelegramAdapter(BasePlatformAdapter):
     async def send_draft(self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Stream a partial message via ``sendRichMessageDraft`` (when rich is enabled and supported) else
         ``sendMessageDraft``; reusing ``draft_id`` animates the preview. The caller sends the final text."""
+        # Drafts are ephemeral frames of the answer being generated: they are read BEFORE (and, on a
+        # streamed turn, instead of) the guarded final send, so the dash normalization every final text
+        # crosses has to be applied here too. Dash-only, code spans untouched, idempotent per frame.
+        content = _dash_safe_draft_text(content)
         if not self._bot:
             return SendResult(success=False, error="not_connected")
         # Rich draft fast-path; any failure degrades to the plain draft below. Drafts have no message_id.
