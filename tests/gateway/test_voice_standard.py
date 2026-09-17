@@ -102,6 +102,39 @@ def test_each_reason_code_is_reportable_on_a_minimal_reply(code):
     assert code in codes_for(samples[code], register="social")
 
 
+def test_a_long_first_sentence_that_answers_directly_is_not_buried():
+    """The false positive that forced this rule.
+
+    The detector used to fire when the first sentence ran past 28 words, which accused a
+    two-sentence answer that led with its answer. Sentence length is not burial.
+    """
+    text = ("The fast path now holds ordinary turns to exactly one model call and zero tools, "
+            "which kills the old failure where a bare hi could wander into a 35-call, "
+            "21-minute turn.")
+    assert len(text.split()) > 28
+    assert "buried_answer" not in codes_for(text, register="chat")
+
+
+def test_structure_or_a_meta_opener_before_the_answer_is_still_buried():
+    """The replacement rule: a header, fence, table, bullet or meta opener ahead of the prose.
+
+    This is the half that must keep failing, or the fix would just be a hole.
+    """
+    for buried in (
+        "- one\n- two\n\nYes, it is done.",
+        "**the result:**\nIt worked.",
+        "```\ncost: 12\n```\nIt came in at 12.",
+        "| a | b |\n| 1 | 2 |\nThe table says yes.",
+        "From here:\nThe VPS side is fine.",
+        "Board updated to match reality. Here is the read.",
+    ):
+        assert "buried_answer" in codes_for(buried, register="chat"), buried
+
+    # and the same answers without the structure in front are clean
+    for clean in ("Yes, it is done.", "It worked.", "It came in at 12."):
+        assert "buried_answer" not in codes_for(clean, register="chat"), clean
+
+
 def test_audit_returns_findings_in_a_stable_order():
     """Callers group by code; ordering must not depend on regex evaluation order."""
     findings = audit_voice("Verified — Acknowledged.", register="social")

@@ -94,6 +94,14 @@
    "text": "Closed the ones with real evidence behind them, and left the rest open."
   },
   {
+   "id": "A11",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "check",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "The fast path now holds ordinary turns to exactly one model call and zero tools, which kills the old failure where a bare \"hi\" could wander into a 35-call, 21-minute turn. Median latency for those turns went from 16.4s to 8.4s and the worst case from 1269.9s to 13.9s, so it does not make a good turn faster, it stops good turns from going bad."
+  },
+  {
    "id": "B1",
    "expect": "reject",
    "register": "chat",
@@ -149,7 +157,6 @@
    "codes": [
     "em_dash",
     "social_structure",
-    "buried_answer",
     "unneeded_internal_detail"
    ],
    "text": "swap is in 🤍\n\n```\nSwap:  4.0Gi total   0B used   4.0Gi free\n```\n\n**what I set up:**\n\n- **4 GB swapfile** at `/swapfile`, mode `600`, activated immediately\n- **persisted in `/etc/fstab`** so it survives reboot (fstab backed up first: `/etc/fstab.bak-<timestamp>`)\n- **`vm.swappiness=10`** and **`vm.vfs_cache_pressure=50`** in `/etc/sysctl.d/99-swap.conf` — low swappiness means it only kicks in as a safety net rather than paging out your working set (default 60 would have been aggressive on an agent host)\n- ran `systemctl daemon-reload` to clear the stale-fstab warning\n\n**verified:** `findmnt --verify` reports **0 parse errors, 0 errors** — the only remaining warning is just noting that a swapfile is a regular file, which is expected.\n\n**combined with the earlier cleanup:**\n\n```\nused: 6.37 GB → 5.0 GB\navailable: 9.4 GB → 10 GB\nswap: 0 → 4 GB\n```\n\nso you've got both more headroom and an actual buffer now. if something does spike, it'll page instead of getting OOM-killed."
