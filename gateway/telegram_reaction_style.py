@@ -201,9 +201,9 @@ _TONE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         r"selamat (?:pagi|siang|sore|malam)",
         re.IGNORECASE)),
     (TONE_ACKNOWLEDGEMENT, re.compile(
-        r"\b(?:ok|okay|okai|oke+|oki+e+|okey+|k|sure|got it|noted|understood|sounds good|"
+        r"\b(?:ok+|okay+|okai+|oke+y?|oki+e+|okey+|k|sure|got it|noted|understood|sounds good|"
         r"works for me|cool|yep|yup|"
-        r"alright|fine by me|oke+|sia+p+|sip+|bai+k+)\b|👌|👍",
+        r"alright|fine by me|sia+p+|sip+|bai+k+)\b|👌|👍",
         re.IGNORECASE)),
 )
 
