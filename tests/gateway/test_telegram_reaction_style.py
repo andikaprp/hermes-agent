@@ -135,6 +135,21 @@ _TONE_CASES = [
     ("the build is broken", style.TONE_TROUBLE, THUMBS_UP, style.JOB_RECEIPT),
     ("urgent: prod is down", style.TONE_URGENT, THUMBS_UP, style.JOB_RECEIPT),
     ("I moved the meeting to 4pm", style.TONE_ROUTINE, THUMBS_UP, style.JOB_RECEIPT),
+    # This DM mixes Indonesian; the classifier has to read the affection it actually gets.
+    ("sayaang", style.TONE_AFFECTION, "❤", style.JOB_TONE),
+    ("cintaku", style.TONE_AFFECTION, "❤", style.JOB_TONE),
+    ("kangen kamu", style.TONE_AFFECTION, "❤", style.JOB_TONE),
+    ("makasih!", style.TONE_GRATITUDE, "🙏", style.JOB_TONE),
+    ("terima kasih", style.TONE_GRATITUDE, "🙏", style.JOB_TONE),
+    ("keren banget", style.TONE_PRAISE, "👏", style.JOB_TONE),
+    ("wkwkwk lucu", style.TONE_AMUSEMENT, "🤣", style.JOB_TONE),
+    ("halo", style.TONE_GREETING, "🤗", style.JOB_TONE),
+    # "selamat pagi" is a greeting; bare "selamat" is a celebration — the lookahead splits them.
+    ("selamat pagi", style.TONE_GREETING, "🤗", style.JOB_TONE),
+    ("selamat ya", style.TONE_CELEBRATION, "🎉", style.JOB_TONE),
+    ("oke siap", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
+    ("kasihan", style.TONE_SYMPATHY, "😭", style.JOB_TONE),
+    ("gagal terus", style.TONE_TROUBLE, THUMBS_UP, style.JOB_RECEIPT),
 ]
 
 
@@ -240,6 +255,41 @@ _SOCIAL_CORPUS = [
     ("sorry to hear that", style.TONE_SYMPATHY, "😭"),
     ("ok sounds good", style.TONE_ACKNOWLEDGEMENT, "👌"),
     ("got it", style.TONE_ACKNOWLEDGEMENT, "👌"),
+    # The language he actually flirts in: these must be allowed to stand in for a reply.
+    ("sayaang", style.TONE_AFFECTION, "❤"),
+    ("cintaku", style.TONE_AFFECTION, "❤"),
+    ("kangen kamu", style.TONE_AFFECTION, "❤"),
+    ("terima kasih!", style.TONE_GRATITUDE, "🙏"),
+    ("keren banget", style.TONE_PRAISE, "👏"),
+    ("wkwkwk lucu", style.TONE_AMUSEMENT, "🤣"),
+    ("halo", style.TONE_GREETING, "🤗"),
+    ("oke siap", style.TONE_ACKNOWLEDGEMENT, "👌"),
+    ("kasihan", style.TONE_SYMPATHY, "😭"),
+]
+
+# Indonesian work/ask messages. Recognising Indonesian *social* tone created this obligation: a
+# guard that only sees English asks would let "sayaang, tolong cek ya" replace a reply it must not.
+# The trailing "ya" tag counts as an ask, so "makasih ya" still requires text — conservative by
+# design, and the 🙏 glyph is emitted either way.
+_INDONESIAN_TEXT_REQUIRED = [
+    ("tolong cek dong", style.REASON_IMPLICIT_ASK),
+    ("mohon dicek", style.REASON_IMPLICIT_ASK),
+    ("dong", style.REASON_IMPLICIT_ASK),
+    ("makasih ya", style.REASON_IMPLICIT_ASK),
+    ("sayaang ya", style.REASON_IMPLICIT_ASK),
+    ("kirim laporan ya", style.REASON_IMPLICIT_ASK),
+    ("pagi, tolong kirim invoice", style.REASON_IMPLICIT_ASK),
+    ("cek ya", style.REASON_IMPLICIT_ASK),
+    ("bisa bantu?", style.REASON_QUESTION_ASKED),
+    ("gimana statusnya", style.REASON_QUESTION_ASKED),
+    ("kapan rilis", style.REASON_QUESTION_ASKED),
+    ("hapus file itu", style.REASON_MIXED_OR_WORK),
+    ("bayar tagihan", style.REASON_MIXED_OR_WORK),
+    ("ganti password", style.REASON_MIXED_OR_WORK),
+    ("transfer uang", style.REASON_MIXED_OR_WORK),
+    ("perbaiki bug-nya", style.REASON_MIXED_OR_WORK),
+    ("gagal terus", style.REASON_NOT_SOCIAL),
+    ("rusak", style.REASON_NOT_SOCIAL),
 ]
 
 # Everything that must still get words. Grouped by why, so a failure names the rule that broke.
@@ -341,6 +391,15 @@ def test_guard_forces_text_for_work_bearing_and_unrecognized_messages(message, r
 def test_guard_forces_text_for_money_credentials_deletion_and_deploy(message, reason):
     decision = style.decide_reaction_only(message, style=style.STYLE_CONTENT)
     assert decision.mode == style.REPLY_TEXT
+    assert decision.text_required is True
+    assert decision.reason == reason
+
+
+@pytest.mark.parametrize("message,reason", _INDONESIAN_TEXT_REQUIRED)
+def test_guard_stays_hard_in_indonesian(message, reason):
+    """Recognising Indonesian tone must not open a hole in the guard: asks and work still force text."""
+    decision = style.decide_reaction_only(message, style=style.STYLE_CONTENT)
+    assert decision.mode == style.REPLY_TEXT, f"{message!r} was allowed to replace a reply"
     assert decision.text_required is True
     assert decision.reason == reason
 
