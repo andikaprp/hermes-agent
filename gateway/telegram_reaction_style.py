@@ -167,7 +167,8 @@ _TONE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         r"maka+si+h?|terima ?kasih|trims|tengkyu|alhamdulillah)\b|🙏",
         re.IGNORECASE)),
     (TONE_PRAISE, re.compile(
-        r"\b(?:nice work|good job|great job|well done|nailed it|impressive|amazing|awesome|"
+        r"\b(?:nice work|good (?:job|work|girl|boy|bot)|great (?:job|work)|well done|nailed it|"
+        r"impressive|amazing|awesome|"
         r"brilliant|perfect|legend|beautiful work|kere+n+|manta+p+|mantul+|heba+t+|bagu+s+)\b"
         r"|👏|🏆",
         re.IGNORECASE)),
@@ -200,7 +201,8 @@ _TONE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         r"selamat (?:pagi|siang|sore|malam)",
         re.IGNORECASE)),
     (TONE_ACKNOWLEDGEMENT, re.compile(
-        r"\b(?:ok|okay|k|sure|got it|noted|understood|sounds good|works for me|cool|yep|yup|"
+        r"\b(?:ok|okay|okai|oke+|oki+e+|okey+|k|sure|got it|noted|understood|sounds good|"
+        r"works for me|cool|yep|yup|"
         r"alright|fine by me|oke+|sia+p+|sip+|bai+k+)\b|👌|👍",
         re.IGNORECASE)),
 )

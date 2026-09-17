@@ -164,6 +164,11 @@ _TONE_CASES = [
     ("thanksss", style.TONE_GRATITUDE, "🙏", style.JOB_TONE),
     ("wkwkwkwk", style.TONE_AMUSEMENT, "🤣", style.JOB_TONE),
     ("pagiii", style.TONE_GREETING, "🤗", style.JOB_TONE),
+    ("good girl", style.TONE_PRAISE, "👏", style.JOB_TONE),
+    ("good bot", style.TONE_PRAISE, "👏", style.JOB_TONE),
+    ("okieee", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
+    ("okie", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
+    ("okey", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
 ]
 
 
@@ -287,6 +292,8 @@ _SOCIAL_CORPUS = [
     ("thanksss", style.TONE_GRATITUDE, "🙏"),
     ("wkwkwkwk", style.TONE_AMUSEMENT, "🤣"),
     ("pagiii", style.TONE_GREETING, "🤗"),
+    ("good girl", style.TONE_PRAISE, "👏"),
+    ("good bot", style.TONE_PRAISE, "👏"),
 ]
 
 # Indonesian work/ask messages. Recognising Indonesian *social* tone created this obligation: a
