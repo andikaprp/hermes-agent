@@ -33,8 +33,13 @@ may consult the frozen ack/social lexicons:
   stripping ``[]`` would turn ``[ok]`` into an ack;
 * an action verb (merge, run, restart, fix, upgrade, …) anywhere means the message is a
   command, regardless of any ack word sitting next to it;
-* an ack/directive/social phrase with anything attached — a verb, a noun, a target — is a
-  command. ``yes`` has no object; ``yes, patch it`` does;
+* an ack/directive/social phrase with an OBJECT attached is a command. ``yes`` has no
+  object; ``yes, patch it`` does. Object-free words do not count as objects — evaluative
+  adjectives, pronouns, copulas, discourse particles and laughter — so ``oke nice``,
+  ``yeahh i am`` and ``wkwkwkw so cute`` stay ordinary while ``yes ship it``,
+  ``sure, send the report`` and ``yes go`` still do not. The exempt vocabulary is a closed
+  set of words that contains no verb and no noun-object, which is what makes the
+  exemption safe rather than a hole;
 * a question that has to consult the world or some named state (``what time is it in …``,
   ``how is it going with the …``) is never ordinary. A trailing ``?`` on a known bare phrase
   (``ok?``) is decoration, not a question;
@@ -44,10 +49,11 @@ may consult the frozen ack/social lexicons:
   or ask for anything, because there an ack IS a go-ahead;
 * slash commands and native multimodal content are never eligible.
 
-Do not extend ``_ACK_WORDS`` to chase recall. Ambiguous probes (``test``, ``this``,
-``ping``) stay off. Ack words may reach past ``is_trivial_prompt`` (that regex is
-English-only; this deployment's primary user sends ``ya`` / ``oke`` / ``okey``). Social
-(non-ack) turns still require the trivial-prompt judgement.
+Do not extend ``_ACK_WORDS`` to chase recall — it is the approval lexicon and it is frozen.
+Ambiguous probes (``test``, ``this``, ``ping``) stay off, and ``hry`` is off because it
+reads as ``hurry``. A word goes into ``_SOCIAL_WORDS`` only if it cannot carry an
+instruction. Ack words may reach past ``is_trivial_prompt`` (that regex is English-only;
+this deployment's primary user sends ``ya`` / ``oke`` / ``okey``).
 
 Media, quoted replies and group sender prefixes need no separate guard: inbound preprocessing
 folds each of them into the message text as a note, and a leading ``[`` is already rejected.
@@ -94,6 +100,60 @@ _ACK_WORDS = frozenset({
     "no", "n", "nope", "nah", "ya", "iya",
     "got it", "lgtm", "fine", "good", "not really",
 })
+
+# Reactions and greetings: social turns that carry no task and no object.
+# This is NOT the ack list and must not become one. ``_ACK_WORDS`` is frozen because
+# ``yes`` / ``yes merge it`` share a first token; this set holds the other half of what a
+# no-task turn looks like (``lol``, ``hmm``, ``ey``, ``np``) so ordinary-recall stops
+# depending on ``is_trivial_prompt``, which is English-only and missing most of these.
+# Entries are the *collapsed* form: ``_tokens`` strips a trailing repeated run, so
+# ``yeayy`` arrives here as ``yeay``. Never add a word that can carry an instruction
+# (``hry`` is deliberately absent — it reads as ``hurry`` too often to be safe alone).
+_SOCIAL_WORDS = frozenset({
+    "hey", "hi", "hiii", "hello", "yo", "ey", "hei", "hai", "sup", "morning",
+    "night", "bye", "cya", "ttyl", "lol", "lmao", "hmm", "hm", "huh", "ah", "oh",
+    "uhm", "um", "meh", "oof", "wow", "oops", "yay", "yeay", "nice", "cool",
+    "thanks", "thank", "thx", "ty", "np", "yw", "cheers", "welcome",
+    "wkwk", "hehe", "hihi", "xixi",
+})
+# Laughter is productive ("wkwkwkwk", "hahaha"), so it is a pattern, not a word list.
+_LAUGH_RE = re.compile(r"^(?:(?:wk|kw|ha|he|hi|xi|la|ma|lo|je|hu){2,}|wkwk\w*)$", re.I)
+
+# Evaluative adjectives: they can follow an ack without turning it into a command
+# ("oke nice"). No verb, no noun-object, so they cannot smuggle work in.
+_EVALUATIVE_WORDS = frozenset({
+    "nice", "cute", "good", "great", "cool", "fine", "pretty", "sweet", "lovely",
+    "awesome", "amazing", "perfect", "funny", "best", "better", "beautiful",
+    "gorgeous", "delicious", "yummy", "solid", "clean", "smooth", "epic", "lit",
+})
+# Pronouns, copulas and discourse particles. Also object-free, and also instruction-free.
+# ``then`` lives here so ``do it then`` is not *rejected* by the object rule — it is
+# rejected by the directive check, which is the rule that actually applies to it.
+_FILLER_WORDS = frozenset({
+    "i", "i'm", "im", "me", "you", "u", "it", "is", "am", "are", "was", "were",
+    "be", "been", "being", "just", "so", "as", "tho", "though",
+    "then", "now", "here", "there", "also", "and", "but", "very", "really",
+    "quite", "kinda", "sorta", "man", "dude", "bro", "sis", "guys",
+    # ``_tokens`` collapses a trailing repeated character before any set is consulted, so
+    # a word with a doubled final letter arrives shortened: "too" -> "to", "well" -> "wel".
+    # The set must hold the collapsed form or the exemption silently misses it.
+    "to", "wel",
+    "lah", "sih", "nih", "dong", "deh", "kan", "kok",
+})
+_NON_OBJECT_WORDS = _EVALUATIVE_WORDS | _FILLER_WORDS | _SOCIAL_WORDS
+
+
+def _is_social_lexeme(text: str) -> bool:
+    return text in _SOCIAL_WORDS or bool(_LAUGH_RE.match(text))
+
+
+def _is_object_token(token: str) -> bool:
+    """True when this token is the object that turns an ack into a command.
+
+    Only object-free vocabulary is exempt. ``yes ship it`` and ``sure, send the report``
+    keep failing here even though neither verb is in ``_ACTION_VERBS``.
+    """
+    return not (token in _NON_OBJECT_WORDS or _LAUGH_RE.match(token))
 
 # Imperative verbs of action. Independent of the ack list: a message that contains one of
 # these as a whole word is a command even if it also contains ``yes`` / ``ok``.
@@ -160,23 +220,32 @@ def _tokens(text: str) -> list[str]:
 
 
 def _known_leading_len(tokens: Sequence[str]) -> int:
-    """Longest leading ack / directive / trivial phrase length, else 0."""
+    """Longest leading ack / directive / trivial / social phrase length, else 0."""
     max_n = min(3, len(tokens))
     for n in range(max_n, 0, -1):
         phrase = " ".join(tokens[:n])
-        if phrase in _ACK_WORDS or phrase in _DIRECTIVE_WORDS or is_trivial_prompt(phrase):
+        if (
+            phrase in _ACK_WORDS
+            or phrase in _DIRECTIVE_WORDS
+            or phrase in _SOCIAL_WORDS
+            or _LAUGH_RE.match(phrase)
+            or is_trivial_prompt(phrase)
+        ):
             return n
     return 0
 
 
 def _has_attached_object(tokens: Sequence[str]) -> bool:
-    """True when a known bare phrase is followed by any extra token.
+    """True when a known bare phrase is followed by a token that is not itself object-free.
 
-    ``yes`` is an acknowledgement. ``yes merge it`` is an order. The two are made of
-    the same ack word; the extra token is the object that makes it a command.
+    ``yes`` is an acknowledgement. ``yes merge it`` is an order. The two are made of the
+    same ack word; the extra token is what makes it a command — but only if that token can
+    *be* an object. ``oke nice`` and ``yeah i am`` attach only evaluative words and fillers,
+    which cannot carry an instruction, so they stay ordinary. Every command-shaped tail
+    (``ship``, ``send``, ``go``, ``push``) is still caught here.
     """
     n = _known_leading_len(tokens)
-    return n > 0 and len(tokens) > n
+    return n > 0 and any(_is_object_token(tok) for tok in tokens[n:])
 
 
 def _is_consultative(stripped: str, tokens: Sequence[str]) -> bool:
@@ -185,6 +254,8 @@ def _is_consultative(stripped: str, tokens: Sequence[str]) -> bool:
     if (
         phrase in _ACK_WORDS
         or phrase in _DIRECTIVE_WORDS
+        or phrase in _SOCIAL_WORDS
+        or _LAUGH_RE.match(phrase)
         or is_trivial_prompt(stripped)
         or is_trivial_prompt(phrase)
     ):
@@ -262,6 +333,17 @@ def classify_fast_path(
     if phrase in _ACK_WORDS:
         return None if _assistant_proposed(history) else "ack"
     if is_trivial_prompt(stripped) or is_trivial_prompt(phrase):
+        return "social"
+    # A known opening with only object-free words after it: ``oke nice``, ``yeahh i am``,
+    # ``wkwkwkw so cute``. _has_attached_object already proved no token here is an object,
+    # so this cannot promote ``yes merge it`` or ``yes, upgrade it``.
+    n = _known_leading_len(tokens)
+    if n:
+        lead = " ".join(tokens[:n])
+        if lead in _DIRECTIVE_WORDS:
+            return None
+        if lead in _ACK_WORDS:
+            return None if _assistant_proposed(history) else "ack"
         return "social"
     return None
 

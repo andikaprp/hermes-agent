@@ -15,6 +15,7 @@ from gateway.run_turn_fast_path import (
     _ACK_WORDS,
     _ACTION_VERBS,
     _DIRECTIVE_WORDS,
+    _NON_OBJECT_WORDS,
     apply_fast_path_note,
     classify_fast_path,
     fast_path_reason,
@@ -101,9 +102,9 @@ def test_done_stays_off_the_fast_path_deliberately(text):
         assert classify_fast_path(text, history=history) is None
 
 
-@pytest.mark.parametrize("text", ["test", "this", "ping"])
+@pytest.mark.parametrize("text", ["test", "this", "ping", "hry"])
 def test_ambiguous_probes_stay_off_the_fast_path(text):
-    """Genuinely ambiguous: a liveness probe, or the start of a task.
+    """Genuinely ambiguous: a liveness probe, the start of a task, or ``hurry``.
 
     Leave them on the full loop. The fall-through note is not a substitute for
     knowing which one they are.
@@ -238,34 +239,98 @@ def test_only_telegram_dms_are_routed():
 # ── invariants of the gate itself ─────────────────────────────────────────
 
 
-def test_social_path_still_requires_the_trivial_prompt_judgement():
-    """The social (non-ack) path must not reach past ``is_trivial_prompt``.
+def test_every_ordinary_verdict_is_justified_by_a_known_opening_or_a_social_lexeme():
+    """Social and ack verdicts must be traceable to a closed vocabulary.
 
-    Acks may: ``ya`` / ``oke`` / ``okey`` are not in the English-only trivial regex
-    but are still single-token acknowledgements. That is the measured gap, not a
-    widening of the social path.
+    The object-free vocabulary is what lets ``oke nice`` and ``wkwkwkw so cute`` be
+    ordinary without letting ``ok make it faster`` be. If a verdict ever stops being
+    justifiable this way, the exemption has grown into a hole.
     """
-    from gateway.run_turn_fast_path import _bare_word
+    from gateway.run_turn_fast_path import _LAUGH_RE, _SOCIAL_WORDS, _bare_word, _known_leading_len, _tokens
 
     corpus = [
         "hi", "thanks", "yes", "ok", "yess", "okkk", "ya", "oke", "okey",
         "deploy the api", "what time is it", "run the tests",
         "hey can you look at this", "sooo", "no worries at all",
+        "lol", "hmm", "huh", "ey", "np", "yeayy", "wkwkwkw so cute",
+        "oke nice", "yeahh i am", "good morning", "haha",
     ]
     for text in corpus:
         kind = classify_fast_path(text, history=ASSISTANT_STATED)
         if kind == "social":
-            assert is_trivial_prompt(text) or is_trivial_prompt(_bare_word(text)), text
+            bare = _bare_word(text)
+            assert (
+                is_trivial_prompt(text)
+                or is_trivial_prompt(bare)
+                or bare in _SOCIAL_WORDS
+                or _LAUGH_RE.match(bare)
+                or _known_leading_len(_tokens(text))  # known opening + object-free tail
+            ), text
         elif kind == "ack":
-            assert _bare_word(text) in _ACK_WORDS, text
+            toks = _tokens(text)
+            n = _known_leading_len(toks)
+            assert n and " ".join(toks[:n]) in _ACK_WORDS, text
         else:
-            assert kind is None
+            assert kind is None, text
 
 
 def test_directive_and_ack_lexicons_do_not_overlap():
     assert not (_DIRECTIVE_WORDS & _ACK_WORDS)
     assert not (_ACTION_VERBS & _ACK_WORDS)
     assert not (_ACTION_VERBS & _DIRECTIVE_WORDS)
+    assert not (_ACTION_VERBS & _NON_OBJECT_WORDS), "an exempt word cannot also be a verb"
+    assert not (_DIRECTIVE_WORDS & _NON_OBJECT_WORDS)
+
+
+@pytest.mark.parametrize("text", [
+    "oke nice",           # ack + evaluative adjective
+    "yeahh i am",         # ack + pronoun + copula
+    "wkwkwkw so cute",    # laughter + filler + evaluative
+    "ok then",
+    "fine now",
+    "iya it",
+])
+def test_an_ack_carrying_only_object_free_words_is_still_ordinary(text):
+    """Recall recovered by bounding the object rule, not by widening ``_ACK_WORDS``.
+
+    These were falling to the full loop purely because *any* second token used to be
+    read as an object. Evaluative adjectives, pronouns, copulas and discourse
+    particles cannot carry an instruction, so they do not make it one.
+    """
+    assert classify_fast_path(text, history=ASSISTANT_STATED) in ("ack", "social")
+
+
+@pytest.mark.parametrize("text", [
+    "yes ship it",              # verb outside _ACTION_VERBS: caught by the object rule
+    "sure, send the report",    # ditto
+    "ok make it faster",
+    "yes take a look",
+    "ok open the PR",
+    "cool, tell her",
+    "ok go",
+    "yes go",
+    "ok merge it",
+    "yes merge it",
+])
+def test_an_ack_carrying_a_real_object_is_still_a_command(text):
+    """The contract that makes the exemption safe.
+
+    ``ship`` / ``send`` / ``make`` / ``look`` / ``open`` / ``tell`` / ``go`` are not in
+    ``_ACTION_VERBS``. Nothing but the object rule keeps these off the no-tool path, so
+    this is the test that has to fail first if the exemption is ever loosened.
+    """
+    assert classify_fast_path(text, history=ASSISTANT_STATED) is None
+    assert classify_fast_path(text, history=None) is None
+
+
+def test_the_exempt_vocabulary_is_inert_after_a_known_opening():
+    """Every exempt word, appended to ``ok``, must stay ordinary.
+
+    This is the bound on the exemption: it cannot be widened by adding a word that
+    happens to appear in a command, because the appended word is the whole input here.
+    """
+    for word in sorted(_NON_OBJECT_WORDS):
+        assert classify_fast_path(f"ok {word}", history=ASSISTANT_STATED) is not None, word
 
 
 # ── the note ──────────────────────────────────────────────────────────────
