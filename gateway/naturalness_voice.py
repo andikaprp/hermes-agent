@@ -29,9 +29,20 @@ false accusation on a good reply is worse than a miss, because it teaches the wr
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
+
+logger = logging.getLogger(__name__)
+
+try:  # redaction helpers live with the delivery receipts; failing that, log no id at all
+    from gateway.telegram_delivery_receipt import CHAT_DIGEST_PREFIX, redacted_token
+except Exception:  # pragma: no cover - never let a logging helper break the module
+    CHAT_DIGEST_PREFIX = "chat"
+
+    def redacted_token(value: Any, *, prefix: str) -> str:
+        return f"{prefix}=redacted"
 
 REGISTER_CHAT = "chat"
 REGISTER_SOCIAL = "social"
@@ -238,3 +249,60 @@ def codes_for(text: str, *, register: str = REGISTER_CHAT, inbound: str = "",
     """Convenience: the reason codes for one reply."""
     return [f.code for f in audit_voice(text, register=register, inbound=inbound,
                                         asks_for_evidence=asks_for_evidence)]
+
+
+# ---------------------------------------------------------------------------
+# Shadow scoring
+# ---------------------------------------------------------------------------
+# Enforcement is deliberately NOT here. Shadow mode exists so fresh replies can be measured
+# while the generator habits behind em_dash / process_narration / unneeded_internal_detail
+# are still being fixed. Nothing in this module may block, rewrite or delay a send; the
+# reply-time guard is separate follow-up work gated on fresh violations dropping under 10%,
+# zero false failures on the approved corpus, and explicit approval.
+VOICE_SHADOW_MARKER = "voice_shadow"
+
+
+def is_voice_shadow_enabled(user_config: Any = None) -> bool:
+    """Whether outgoing replies are shadow-scored. Absent key means ON.
+
+    The gateway loads user YAML without merging DEFAULT_CONFIG, so absence must still mean
+    enabled or the shadow data silently stops accumulating on configs that predate the key.
+    """
+    if not isinstance(user_config, dict):
+        return True
+    node: Any = user_config
+    for key in ("gateway", "telegram", "voice_shadow"):
+        if not isinstance(node, dict):
+            return True
+        node = node.get(key, None)
+        if node is None:
+            return True
+    if isinstance(node, bool):
+        return node
+    if isinstance(node, str):
+        return node.strip().lower() not in {"false", "off", "no", "0", ""}
+    return bool(node)
+
+
+def log_voice_shadow(text: Any, *, register: str = REGISTER_CHAT,
+                     chat_id: Any = None) -> Sequence[str]:
+    """Score an outgoing reply and log the reason codes. Never blocks and never rewrites.
+
+    Returns the codes so a test can assert on them without reading the log. Deliberately
+    total: any failure is swallowed, because a measurement must never fail a send.
+    """
+    try:
+        if not isinstance(text, str) or not text.strip():
+            return []
+        codes = codes_for(text, register=register)
+        logger.info(
+            "[latency] " + VOICE_SHADOW_MARKER + " chat=%s register=%s codes=%s words=%d",
+            redacted_token(chat_id, prefix=CHAT_DIGEST_PREFIX), register,
+            ",".join(codes) or "clean", len(text.split()),
+            extra={"voice_shadow": {"register": register, "codes": list(codes),
+                                    "words": len(text.split())}},
+        )
+        return codes
+    except Exception:  # pragma: no cover - a scorer must not break a turn
+        logger.debug("voice shadow scoring failed", exc_info=True)
+        return []

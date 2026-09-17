@@ -1553,6 +1553,27 @@ class TurnRunner:
             ctx.fast_path_taken = fast_path_reason_
         return persist_override, ctx.persist_user_timestamp
 
+    def _shadow_score_reply(self, text: Any) -> None:
+        """Log the voice-standard reason codes for an outgoing reply.
+
+        Shadow mode: it records, it never blocks, rewrites or delays. Reply-time enforcement
+        is separate follow-up work, gated on fresh violations dropping under 10%, zero false
+        failures on the approved corpus, and Andika's approval. Must never raise.
+        """
+        try:
+            from gateway.naturalness_voice import is_voice_shadow_enabled, log_voice_shadow
+
+            ctx = self._ctx
+            if not is_voice_shadow_enabled(ctx.user_config):
+                return
+            log_voice_shadow(
+                text,
+                register="social" if ctx.fast_path_taken else "chat",
+                chat_id=getattr(ctx.source, "chat_id", None),
+            )
+        except Exception:
+            logger.debug("voice shadow scoring failed", exc_info=True)
+
     def _fast_path_reason(self, agent_history) -> Optional[str]:
         """Why this turn needs no tool surface, or None. See gateway/run_turn_fast_path.py."""
         from gateway.run import _platform_config_key
@@ -1885,9 +1906,11 @@ class TurnRunner:
                 final_response = f"⚠️ {result['error']}" if result.get("error") else ""
             # NOTE: deliberately omits agent_persisted/last_reasoning/response_* — the caller
             # defaults agent_persisted differently when the key is absent.
+            self._shadow_score_reply(final_response)
             ctx.timing.log_terminal()
             return {"final_response": final_response, **common}
         final_response = self._append_auto_media_tags(final_response, result, agent_history, history_media_paths)
+        self._shadow_score_reply(final_response)
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
         # Terminal log is deferred to finish_delivery() so final_delivery can be observed.
