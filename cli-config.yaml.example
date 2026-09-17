@@ -1307,6 +1307,9 @@ platform_toolsets:
 #     # guest_mode lets explicit @mentions from non-allowlisted groups through.
 #     # Default false; ordinary messages, replies, and regex wake words stay blocked.
 #     guest_mode: false
+#     # reaction_style: lifecycle  # lifecycle (default) keeps 👀→👍/👎; content matches the
+#     #                            # success glyph to a purely social message and may let a
+#     #                            # reaction stand in for the reply (see Telegram docs)
 #     # allowed_chats: ["-1001234567890"]
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages

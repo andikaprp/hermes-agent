@@ -1267,6 +1267,71 @@ Unlike Discord (where reactions are additive), Telegram's Bot API replaces all b
 If the bot doesn't have permission to add reactions in a group, the reaction calls fail silently and message processing continues normally.
 :::
 
+### Reaction styles
+
+`telegram.reaction_style` selects *which* glyph the bot picks. It has two values, and the
+default never changes what a running install already does:
+
+```yaml
+telegram:
+  reactions: true
+  reaction_style: lifecycle   # lifecycle (default) | content
+```
+
+| Style | 👀 while processing | on success | on failure |
+|---|---|---|---|
+| `lifecycle` (default) | always | 👍 | 👎 |
+| `content` | always | a tone glyph for a purely social message, 👍 otherwise | 👎 |
+
+Both styles keep the 👀 acknowledgement and the 👎 failure glyph: those are *receipts*, and a
+failed turn's glyph already carries the one bit a reader needs. The content style adds the
+*tone* half — when the reaction is the natural reply to what you sent:
+
+| What you sent | Glyph |
+|---|---|
+| affection ("love you") | ❤ |
+| a joke ("haha that's hilarious") | 🤣 |
+| sympathy ("sorry to hear that") | 😭 |
+| thanks | 🙏 |
+| praise ("nice work") | 👏 |
+| congrats / milestone | 🎉 |
+| a greeting | 🤗 |
+| an acknowledgement ("got it") | 👌 |
+
+Anything the classifier does not recognize — a question, an error report, plain prose — gets
+👍, exactly what the default style sends. Two things worth knowing:
+
+- Telegram curates the emoji a bot may react with, and rejects anything else. ✅ and 😂 are
+  **not** in that set, so "done" is 👍 and "that's funny" is 🤣; the heart is sent in
+  Telegram's own form (❤).
+- Classification reads *your* message text — never the assistant's reply — and is plain
+  keyword matching, so it adds no latency and no model call.
+
+### When a reaction is the whole reply
+
+Under `reaction_style: content` the bot *may* answer a purely social message with a reaction
+and no text at all (a 🙏 to "thank you", a 🎉 to "we did it"). It is a claim the sender must
+make explicitly, and it is refused — forcing text — whenever any of these hold:
+
+- the message asks something, explicitly ("?") or implicitly ("can you…", "please…");
+- it is a work, status, or verification report ("the tests pass", "deployed to prod");
+- something is pending a decision, or needs a next step;
+- money, credentials, deletion, or a deploy is involved;
+- the message mixes social tone with any of the above ("thanks, the tests pass now");
+- nothing in it matches a known social tone;
+- the sender is in any way unsure.
+
+The refusal is not silent: the react call's result carries `text_required: true` plus a
+machine-readable reason (`question_asked`, `mixed_or_work`, `style_disabled`, …), so a caller
+never mistakes a refused claim for a delivered reply. Under the default `lifecycle` style the
+answer is always `style_disabled` — a reaction is never allowed to stand in for text.
+
+Enable the style via environment variable if you prefer:
+
+```bash
+TELEGRAM_REACTION_STYLE=content
+```
+
 ## Per-Channel Prompts
 
 Assign ephemeral system prompts to specific Telegram groups or forum topics. The prompt is injected at runtime on every turn — never persisted to transcript history — so changes take effect immediately.
