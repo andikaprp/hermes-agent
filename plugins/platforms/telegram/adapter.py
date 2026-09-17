@@ -24,6 +24,14 @@ from gateway.platforms._shared import (
     platform_gate_env as _scoped_gate_env,
 )
 from gateway.telegram_delivery_receipt import TelegramDeliveryReceipt
+from gateway.telegram_reaction_receipt import (
+    LOCAL_NO_BOT,
+    PHASE_CANCELLED,
+    PHASE_COMPLETE,
+    PHASE_DIRECT,
+    PHASE_START,
+    TelegramReactionReceipt,
+)
 
 
 def _redact_telegram_error_text(error: object) -> str:
@@ -6623,23 +6631,47 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         return str(configured).lower() not in {"false", "0", "no"}
 
-    async def _set_reaction(self, chat_id: str, message_id: str, emoji: Optional[str]) -> bool:
-        """Set a single emoji reaction (``None`` clears all bot-set reactions, the documented Bot API way)."""
+    def _build_reaction_receipt(self, chat_id: Any, message_id: Any, emoji: Optional[str],
+                                phase: str) -> Optional[TelegramReactionReceipt]:
+        """Fail-open receipt handle for one reaction attempt; ``None`` when the receipt module
+        cannot build one (receipt bookkeeping must never break the reaction path)."""
+        try:
+            return TelegramReactionReceipt(
+                chat_id=chat_id, message_id=message_id, emoji=emoji, phase=phase)
+        except Exception:
+            return None
+
+    async def _set_reaction(self, chat_id: str, message_id: str, emoji: Optional[str], *,
+                            phase: str = PHASE_DIRECT) -> bool:
+        """Set a single emoji reaction (``None`` clears all bot-set reactions, the documented Bot API way).
+
+        Emits one redacted receipt per attempt (``gateway.telegram_reaction_receipt``): hashed chat
+        and message ids, the emoji (``none`` for a clear), the *phase* the attempt belongs to, and
+        the outcome plus failure class. The receipt carries no message text and never raises.
+        """
+        receipt = self._build_reaction_receipt(chat_id, message_id, emoji, phase)
         if not self._bot:
+            if receipt is not None:
+                receipt.failed(LOCAL_NO_BOT)
             return False
         try:
             await self._bot.set_message_reaction(chat_id=normalize_telegram_chat_id(chat_id), message_id=int(message_id), reaction=emoji)
-            return True
         except Exception as e:
             if emoji is None:
                 logger.debug("[%s] clear reactions failed: %s", self.name, _redact_telegram_error_text(e))
             else:
                 logger.debug("[%s] set_message_reaction failed (%s): %s", self.name, emoji, _redact_telegram_error_text(e))
+            if receipt is not None:
+                receipt.failed(e)
             return False
+        if receipt is not None:
+            receipt.succeeded()
+        return True
 
-    async def _clear_reactions(self, chat_id: str, message_id: str) -> bool:
+    async def _clear_reactions(self, chat_id: str, message_id: str, *,
+                               phase: str = PHASE_DIRECT) -> bool:
         """Clear all bot-set reactions."""
-        return await self._set_reaction(chat_id, message_id, None)
+        return await self._set_reaction(chat_id, message_id, None, phase=phase)
 
     async def add_reaction(self, chat_id: str, emoji: str, message_id: Optional[str] = None) -> Dict[str, Any]:
         """Native tapback via ``setMessageReaction``. Deliberate agent intent — not gated by TELEGRAM_REACTIONS.
@@ -6667,7 +6699,7 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
         if chat_id and message_id:
-            await self._set_reaction(chat_id, message_id, "\U0001f440")
+            await self._set_reaction(chat_id, message_id, "\U0001f440", phase=PHASE_START)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Swap the in-progress reaction for a final success/failure reaction (set_message_reaction
@@ -6679,9 +6711,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if not (chat_id and message_id):
             return
         if outcome == ProcessingOutcome.CANCELLED:
-            await self._clear_reactions(chat_id, message_id)
+            await self._clear_reactions(chat_id, message_id, phase=PHASE_CANCELLED)
         else:
-            await self._set_reaction(chat_id, message_id, "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e")
+            await self._set_reaction(chat_id, message_id, "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e", phase=PHASE_COMPLETE)
 
 
 # -- Plugin registration glue: register(ctx) plus the hook implementations (adapter factory, YAML→env/extra
