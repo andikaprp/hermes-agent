@@ -115,6 +115,9 @@ RE_TOOL = re.compile(r"tool (\S+) completed \(([\d.]+)s, (\d+) chars\)")
 RE_FIRST_DELTA = re.compile(r"stream_first_delta turn=(\S+) chat=(\S+) since_open_ms=([\d.]+)")
 RE_FIRST_VISIBLE = re.compile(
     r"stream_first_visible turn=(\S+) chat=(\S+) since_open_ms=([\d.]+)(?: since_first_delta_ms=([\d.]+))?")
+RE_FAST_PATH = re.compile(r"fast_path_turn chat=(\S+) reason=(\S+)")
+RE_FAST_PATH_OUTCOME = re.compile(
+    r"fast_path_outcome chat=(\S+) reason=(\S+) api_calls=(\d+) tool_calls=(\d+)")
 RE_SESSION_TAG = re.compile(r"\[(\d{8}_\d{6}_[0-9a-f]+)\]")
 
 # A gap this far above the configured quiet window cannot be a clean coalescing wait:
@@ -203,6 +206,8 @@ class LogScan:
         self.tool: List[Dict[str, Any]] = []
         self.first_delta: List[Dict[str, Any]] = []
         self.first_visible: List[Dict[str, Any]] = []
+        self.fast_path: List[Dict[str, Any]] = []
+        self.fast_path_outcome: List[Dict[str, Any]] = []
 
 
 def scan_logs(gateway_paths: Iterable[str], agent_paths: Iterable[str]) -> LogScan:
@@ -240,6 +245,12 @@ def scan_logs(gateway_paths: Iterable[str], agent_paths: Iterable[str]) -> LogSc
                         "ts": ts, "turn": m.group(1), "chat": m.group(2),
                         "since_open_ms": float(m.group(3)),
                         "since_first_delta_ms": float(m.group(4)) if m.group(4) else None})
+                elif (m := RE_FAST_PATH_OUTCOME.search(line)):
+                    scan.fast_path_outcome.append({
+                        "ts": ts, "chat": m.group(1), "reason": m.group(2),
+                        "api_calls": int(m.group(3)), "tool_calls": int(m.group(4))})
+                elif (m := RE_FAST_PATH.search(line)):
+                    scan.fast_path.append({"ts": ts, "chat": m.group(1), "reason": m.group(2)})
                 elif RE_SUPPRESS.search(line):
                     scan.suppress.append({"ts": ts})
         # WARNING: two different log names appear for the same adapter (hermes_plugins.*
@@ -286,6 +297,7 @@ def build_turns(scan: LogScan, platform: str = "telegram") -> List[Dict[str, Any
             "response_chars": r["response_chars"],
             "flush": [], "receipt": [], "inbound": [], "turnctx": [], "watch": [], "suppress": [],
             "final_send": [], "first_delta": [], "first_visible": [],
+            "fast_path": [], "fast_path_outcome": [],
         })
     turns.sort(key=lambda t: t["ready_ts"])
 
@@ -302,13 +314,15 @@ def build_turns(scan: LogScan, platform: str = "telegram") -> List[Dict[str, Any
                                 (scan.watch, "watch"), (scan.suppress, "suppress"),
                                 (scan.final_send, "final_send"),
                                 (scan.first_delta, "first_delta"),
-                                (scan.first_visible, "first_visible")):
+                                (scan.first_visible, "first_visible"),
+                                (scan.fast_path, "fast_path"),
+                                (scan.fast_path_outcome, "fast_path_outcome")):
         for item in marker_list:
             t = owner(item["ts"])
             if t is not None:
                 t[bucket].append(item)
     for bucket in ("flush", "receipt", "inbound", "turnctx", "watch", "suppress", "final_send",
-                   "first_delta", "first_visible"):
+                   "first_delta", "first_visible", "fast_path", "fast_path_outcome"):
         for t in turns:
             t[bucket].sort(key=lambda i: i["ts"])
 
@@ -431,12 +445,28 @@ def measure_turn(turn: Dict[str, Any], quiet_seconds: Optional[float],
     if first_visible and platform_ts is not None:
         stream_first_visible_ms = round((first_visible[0]["ts"] - platform_ts) * 1000.0, 1)
 
+    outcome = turn["fast_path_outcome"]
+    routed = turn["fast_path"]
+    fast_path_taken = bool(outcome or routed)
+    fast_path_reason = (outcome[0]["reason"] if outcome else (routed[0]["reason"] if routed else None))
+    fast_path_api_calls = outcome[0]["api_calls"] if outcome else None
+    fast_path_tool_calls = outcome[0]["tool_calls"] if outcome else None
+    # Compliance with the one-hop contract: measurable only when the outcome marker is present.
+    fast_path_one_hop = None
+    if outcome:
+        fast_path_one_hop = outcome[0]["api_calls"] == 1 and outcome[0]["tool_calls"] == 0
+
     api_sessions = {a["session"] for a in turn["api"]}
     return {
         "stream_ttft_ms": stream_ttft_ms,
         "stream_first_visible_ms": stream_first_visible_ms,
         "stream_transport_ms": stream_transport_ms,
         "streamed": bool(first_delta or first_visible),
+        "fast_path_taken": fast_path_taken,
+        "fast_path_reason": fast_path_reason,
+        "fast_path_api_calls": fast_path_api_calls,
+        "fast_path_tool_calls": fast_path_tool_calls,
+        "fast_path_one_hop": fast_path_one_hop,
         "ready_ts": turn["ready_ts"],
         "ready_at": _dt.datetime.fromtimestamp(turn["ready_ts"]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
         "date": _dt.datetime.fromtimestamp(turn["ready_ts"]).strftime("%Y-%m-%d"),
@@ -635,6 +665,10 @@ def aggregate(measured: List[Dict[str, Any]]) -> Dict[str, Any]:
         "stream_ttft_ms": lambda s: s["stream_ttft_ms"],
         "stream_first_visible_ms": lambda s: s["stream_first_visible_ms"],
         "stream_transport_ms": lambda s: s["stream_transport_ms"],
+        "fast_path_taken": lambda s: 1.0 if s["fast_path_taken"] else 0.0,
+        "fast_path_one_hop": lambda s: None if s["fast_path_one_hop"] is None else (1.0 if s["fast_path_one_hop"] else 0.0),
+        "fast_path_api_calls": lambda s: s["fast_path_api_calls"],
+        "fast_path_tool_calls": lambda s: s["fast_path_tool_calls"],
     }
     groups: Dict[str, List[Dict[str, Any]]] = {"all": measured}
     for s in measured:

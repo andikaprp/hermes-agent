@@ -11,11 +11,14 @@ import pytest
 from agent.memory_provider import is_trivial_prompt
 from gateway.run_turn_fast_path import (
     FAST_PATH_NOTE,
+    FAST_PATH_OUTCOME_MARKER,
     _ACK_WORDS,
     _DIRECTIVE_WORDS,
     apply_fast_path_note,
     classify_fast_path,
     fast_path_reason,
+    is_fast_path_enabled,
+    log_fast_path_outcome,
 )
 
 ASSISTANT_ASKED = [{"role": "assistant", "content": "Shall I deploy it to production?"}]
@@ -37,6 +40,24 @@ def test_acks_take_the_fast_path_when_the_assistant_proposed_nothing(text):
     assert classify_fast_path(text, history=ASSISTANT_STATED) == "ack"
 
 
+@pytest.mark.parametrize("text", ["ya", "oke", "okey", "iya"])
+def test_indonesian_acks_take_the_fast_path(text):
+    """This deployment's primary user writes mixed Indonesian/English.
+
+    ``ya`` / ``oke`` / ``okey`` are single-token acknowledgements indistinguishable
+    from yes/ok. Routing them through the full agentic loop is the 3x-cost failure
+    LAB-3 measured. Nothing else in the suite would catch a regression on the
+    single most common acknowledgement this user sends.
+    """
+    assert classify_fast_path(text, history=ASSISTANT_STATED) == "ack"
+    assert classify_fast_path(text, history=None) == "ack"
+
+
+@pytest.mark.parametrize("text", ["yup", "fine", "good", "not really"])
+def test_english_acks_that_were_missing_from_the_first_lexicon(text):
+    assert classify_fast_path(text, history=ASSISTANT_STATED) == "ack"
+
+
 def test_chat_elongation_is_still_an_ack():
     """LAB-3's worst turn was ``yess`` -> 24 model calls, 23 tool calls, 206 s.
 
@@ -52,7 +73,8 @@ def test_chat_elongation_is_still_an_ack():
 # ── turns that must NOT take the fast path ────────────────────────────────
 
 
-@pytest.mark.parametrize("text", ["yes", "yess", "ok", "sure", "yeah", "got it", "lgtm"])
+@pytest.mark.parametrize("text", ["yes", "yess", "ok", "sure", "yeah", "got it", "lgtm",
+                                  "ya", "oke", "okey", "yup", "fine", "good", "not really"])
 @pytest.mark.parametrize("history", [ASSISTANT_ASKED, ASSISTANT_QUESTION])
 def test_an_ack_answering_a_proposal_is_a_go_ahead_and_keeps_its_tools(text, history):
     """The failure mode this gate exists to avoid: "yes" to "shall I deploy?" is real work."""
@@ -63,6 +85,30 @@ def test_an_ack_answering_a_proposal_is_a_go_ahead_and_keeps_its_tools(text, his
 def test_directive_words_never_take_the_fast_path(text):
     for history in (None, ASSISTANT_STATED, ASSISTANT_ASKED):
         assert classify_fast_path(text, history=history) is None
+
+
+@pytest.mark.parametrize("text", ["done", "done?"])
+def test_done_stays_off_the_fast_path_deliberately(text):
+    """Deliberate, not a miss. Do not "fix" this.
+
+    A bare ``done`` from a user usually reports a finished step and expects the
+    agent to take the next one. Routing it onto the no-tool path would drop that
+    work. Trailing ``?`` is decoration: ``_bare_word`` strips it, so ``done?``
+    is the same token.
+    """
+    for history in (None, ASSISTANT_STATED, ASSISTANT_ASKED):
+        assert classify_fast_path(text, history=history) is None
+
+
+@pytest.mark.parametrize("text", ["test", "this", "ping"])
+def test_ambiguous_probes_stay_off_the_fast_path(text):
+    """Genuinely ambiguous: a liveness probe, or the start of a task.
+
+    Leave them on the full loop. The fall-through note is not a substitute for
+    knowing which one they are.
+    """
+    assert classify_fast_path(text, history=ASSISTANT_STATED) is None
+    assert classify_fast_path(text, history=None) is None
 
 
 def test_an_ack_after_a_pending_tool_call_keeps_its_tools():
@@ -120,21 +166,28 @@ def test_only_telegram_dms_are_routed():
 # ── invariants of the gate itself ─────────────────────────────────────────
 
 
-def test_the_gate_is_never_broader_than_the_shipped_trivial_prompt_judgement():
-    """Eligibility is a strict subset of "this prompt carries no semantic signal".
+def test_social_path_still_requires_the_trivial_prompt_judgement():
+    """The social (non-ack) path must not reach past ``is_trivial_prompt``.
 
-    ``is_trivial_prompt`` is the single source of truth the memory prefetch already trusts;
-    the fast path may only ever narrow it, never reach past it.
+    Acks may: ``ya`` / ``oke`` / ``okey`` are not in the English-only trivial regex
+    but are still single-token acknowledgements. That is the measured gap, not a
+    widening of the social path.
     """
     from gateway.run_turn_fast_path import _bare_word
 
     corpus = [
-        "hi", "thanks", "yes", "ok", "yess", "okkk", "deploy the api", "what time is it",
-        "run the tests", "hey can you look at this", "sooo", "no worries at all",
+        "hi", "thanks", "yes", "ok", "yess", "okkk", "ya", "oke", "okey",
+        "deploy the api", "what time is it", "run the tests",
+        "hey can you look at this", "sooo", "no worries at all",
     ]
     for text in corpus:
-        if classify_fast_path(text, history=ASSISTANT_STATED) is not None:
+        kind = classify_fast_path(text, history=ASSISTANT_STATED)
+        if kind == "social":
             assert is_trivial_prompt(text) or is_trivial_prompt(_bare_word(text)), text
+        elif kind == "ack":
+            assert _bare_word(text) in _ACK_WORDS, text
+        else:
+            assert kind is None
 
 
 def test_directive_and_ack_lexicons_do_not_overlap():
@@ -228,3 +281,79 @@ def test_an_interrupted_turn_keeps_its_tools_even_for_a_bare_ack():
     runner._prepare_turn_message(interrupted)
 
     assert FAST_PATH_NOTE not in ctx.message
+
+
+def test_disabled_config_stops_the_note_from_being_prepended():
+    runner, ctx = _turn_runner("ya")
+    ctx.user_config = {"gateway": {"telegram": {"fast_path": False}}}
+    runner._prepare_turn_message(list(ASSISTANT_STATED))
+    assert ctx.message == "ya"
+    assert ctx.fast_path_taken is None
+
+
+def test_fast_path_defaults_on_when_the_key_is_absent():
+    """The gateway does not merge DEFAULT_CONFIG; absence must still mean on."""
+    assert is_fast_path_enabled({}) is True
+    assert is_fast_path_enabled(None) is True
+    assert fast_path_reason(
+        "hi", platform_key="telegram", chat_type="dm", history=None, user_config={},
+    ) == "social"
+
+
+def test_fast_path_disabled_from_user_yaml_through_the_gateway_loader(tmp_path):
+    """Invariant: set the key in a real config.yaml and the gateway loader honours it.
+
+    ``load_user_config_effective`` is the loader ``_load_gateway_config`` uses — no
+    DEFAULT_CONFIG merge. A user who writes ``fast_path: false`` must be able to
+    disable the path without a code change.
+    """
+    from hermes_cli.config_effective import load_user_config_effective
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("gateway:\n  telegram:\n    fast_path: false\n", encoding="utf-8")
+    cfg = load_user_config_effective(cfg_path)
+    assert is_fast_path_enabled(cfg) is False
+    assert fast_path_reason(
+        "ya", platform_key="telegram", chat_type="dm",
+        history=ASSISTANT_STATED, user_config=cfg,
+    ) is None
+
+
+@pytest.mark.parametrize("raw", [False, "false", "off", "0", "no"])
+def test_fast_path_off_tokens(raw):
+    assert is_fast_path_enabled({"gateway": {"telegram": {"fast_path": raw}}}) is False
+
+
+def test_fast_path_outcome_records_call_counts(caplog):
+    import logging
+
+    result = {
+        "api_calls": 1,
+        "messages": [
+            {"role": "user", "content": "ya"},
+            {"role": "assistant", "content": "sip"},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        log_fast_path_outcome("ack", result, chat_id="4242")
+    assert FAST_PATH_OUTCOME_MARKER in caplog.text
+    assert "api_calls=1" in caplog.text
+    assert "tool_calls=0" in caplog.text
+    assert "4242" not in caplog.text
+
+
+def test_fast_path_outcome_counts_tool_calls_from_assistant_rows(caplog):
+    import logging
+
+    result = {
+        "api_calls": 3,
+        "messages": [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}, {"id": "2"}]},
+            {"role": "tool", "content": "ok"},
+            {"role": "assistant", "content": "done", "tool_calls": [{"id": "3"}]},
+        ],
+    }
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        log_fast_path_outcome("ack", result, chat_id="1")
+    assert "api_calls=3" in caplog.text
+    assert "tool_calls=3" in caplog.text

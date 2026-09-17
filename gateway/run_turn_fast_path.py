@@ -27,11 +27,20 @@ The gate is deliberately narrower than the thing it reuses. Eligibility requires
 prompt carries no semantic signal", already trusted to skip memory recall — and then removes
 from it everything that could be an instruction to act:
 
-* directive words (``continue``, ``do it``, ``proceed``, ...) are never eligible;
-* ack words (``yes``, ``ok``, ``sure``, ...) are eligible only when the assistant's last
+* directive words (``continue``, ``do it``, ``proceed``, ``done``, ...) are never eligible.
+  ``done`` is deliberate: a user reporting a finished step usually expects the next one;
+* ack words (``yes``, ``ok``, ``ya``, ``oke``, ...) are eligible only when the assistant's last
   message did not propose or ask for anything, because there an ack IS a go-ahead;
 * slash commands are never eligible;
 * anything that is not a plain string (native multimodal content) is never eligible.
+
+Ack words may reach past ``is_trivial_prompt``. That regex is English-only, and the most
+common acknowledgement from this deployment's primary user is Indonesian ``ya`` / ``oke`` /
+``okey`` — single-token, indistinguishable from yes/ok, and exactly the 3x-cost failure
+LAB-3 measured when they entered the full loop. Social (non-ack) turns still require the
+trivial-prompt judgement. Ambiguous probes (``test``, ``this``, ``ping``) stay off: they
+may be a liveness check or the start of a task, and the fall-through note is not a
+substitute for knowing which.
 
 Media, quoted replies and group sender prefixes need no separate guard: inbound preprocessing
 folds each of them into the message text as a note, and ``TRIVIAL_PROMPT_RE`` is anchored, so
@@ -50,6 +59,12 @@ from gateway.telegram_delivery_receipt import CHAT_DIGEST_PREFIX, redacted_token
 logger = logging.getLogger("gateway.run_turn")
 
 FAST_PATH_MARKER = "fast_path_turn"
+FAST_PATH_OUTCOME_MARKER = "fast_path_outcome"
+
+# config.yaml: gateway.telegram.fast_path (default on). The gateway loads user YAML with no
+# DEFAULT_CONFIG merge, so absence of the key MUST still mean enabled — a missing nested dict
+# is not an opt-out.
+CONFIG_KEY = "gateway.telegram.fast_path"
 
 # Platforms whose DMs route through the fast path. Telegram is where LAB-3 measured the loss;
 # the classifier itself is platform-agnostic, so widening this is a one-line change once
@@ -58,14 +73,19 @@ FAST_PATH_PLATFORMS = frozenset({"telegram"})
 _DM_CHAT_TYPES = frozenset({"dm", "private"})
 
 # Trivial words that instruct work. "done" and "next" are included: from a user they usually
-# report a finished step and expect the agent to take the following one.
+# report a finished step and expect the agent to take the following one. Do not move "done"
+# onto the fast path — that is a measured, deliberate exclusion (see the test of the same name).
 _DIRECTIVE_WORDS = frozenset({"continue", "go ahead", "do it", "proceed", "next", "done"})
 
-# Trivial words that are an approval only in context. Safe alone; a go-ahead when the assistant
-# just proposed something, which ``_ASSISTANT_PROPOSED_RE`` detects.
+# Acknowledgements that are an approval only in context. Safe alone; a go-ahead when the
+# assistant just proposed something, which ``_ASSISTANT_PROPOSED_RE`` detects.
+# ``ya`` / ``oke`` / ``okey`` / ``iya`` are Indonesian (and mixed-ID/EN) equivalents of yes/ok —
+# this deployment's primary user sends them more than the English forms. They are not in
+# ``TRIVIAL_PROMPT_RE`` (English-only); the classifier matches them via this set directly.
 _ACK_WORDS = frozenset({
-    "yes", "y", "yep", "yeah", "ok", "okay", "k", "sure", "no", "n", "nope", "nah",
-    "got it", "lgtm",
+    "yes", "y", "yep", "yup", "yeah", "ok", "okay", "oke", "okey", "k", "sure",
+    "no", "n", "nope", "nah", "ya", "iya",
+    "got it", "lgtm", "fine", "good", "not really",
 })
 
 # The assistant's last message invited an action, so an ack answers it.
@@ -120,6 +140,25 @@ def _assistant_proposed(history: Optional[Sequence[Any]]) -> bool:
     return False
 
 
+def is_fast_path_enabled(user_config: Any = None) -> bool:
+    """``gateway.telegram.fast_path`` in config.yaml; default on.
+
+    The gateway reads user YAML with no DEFAULT_CONFIG merge, so a missing key is enabled,
+    not off. Explicit ``false``/``off``/``0``/``no`` disables without a code change.
+    """
+    try:
+        gw = user_config.get("gateway") if isinstance(user_config, dict) else None
+        tg = gw.get("telegram") if isinstance(gw, dict) else None
+        if not isinstance(tg, dict) or "fast_path" not in tg:
+            return True
+        value = tg.get("fast_path")
+        if isinstance(value, str):
+            return value.strip().lower() not in {"false", "0", "no", "off"}
+        return bool(value)
+    except Exception:
+        return True
+
+
 def classify_fast_path(
     message: Any, *, history: Optional[Sequence[Any]] = None,
 ) -> Optional[str]:
@@ -133,20 +172,22 @@ def classify_fast_path(
     if not stripped or stripped.startswith("/"):
         return None
     word = _bare_word(stripped)
-    if not (is_trivial_prompt(stripped) or is_trivial_prompt(word)):
-        return None
     if word in _DIRECTIVE_WORDS:
         return None
     if word in _ACK_WORDS:
         return None if _assistant_proposed(history) else "ack"
+    if not (is_trivial_prompt(stripped) or is_trivial_prompt(word)):
+        return None
     return "social"
 
 
 def fast_path_reason(
     message: Any, *, platform_key: Optional[str], chat_type: Optional[str],
-    history: Optional[Sequence[Any]] = None,
+    history: Optional[Sequence[Any]] = None, user_config: Any = None,
 ) -> Optional[str]:
     """``classify_fast_path`` restricted to the surfaces the fast path is enabled on."""
+    if not is_fast_path_enabled(user_config):
+        return None
     if str(platform_key or "").lower() not in FAST_PATH_PLATFORMS:
         return None
     if str(chat_type or "").lower() not in _DM_CHAT_TYPES:
@@ -162,3 +203,36 @@ def apply_fast_path_note(message: str, reason: str, *, chat_id: Any = None) -> s
         extra={"fast_path": {"marker": FAST_PATH_MARKER, "reason": reason}},
     )
     return FAST_PATH_NOTE + "\n\n" + message
+
+
+def _count_tool_calls(result: Any) -> int:
+    n = 0
+    for message in (result or {}).get("messages") or []:
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        calls = message.get("tool_calls") or []
+        if isinstance(calls, list):
+            n += len(calls)
+    return n
+
+
+def log_fast_path_outcome(reason: str, result: Any, *, chat_id: Any = None) -> None:
+    """Turn-end marker: whether the fast path was taken, and how many calls it used.
+
+    LAB-3 could not verify "one model call, zero tools" from logs because only the routing
+    decision was visible. This line closes that: ``api_calls`` and ``tool_calls`` are the
+    turn's real counts, so the next measurement pass can score compliance without guessing.
+    """
+    api_calls = int((result or {}).get("api_calls") or 0)
+    tool_calls = _count_tool_calls(result)
+    payload = {
+        "marker": FAST_PATH_OUTCOME_MARKER,
+        "reason": reason,
+        "api_calls": api_calls,
+        "tool_calls": tool_calls,
+    }
+    logger.info(
+        "[latency] " + FAST_PATH_OUTCOME_MARKER + " chat=%s reason=%s api_calls=%d tool_calls=%d",
+        redacted_token(chat_id, prefix=CHAT_DIGEST_PREFIX), reason, api_calls, tool_calls,
+        extra={"fast_path": payload},
+    )
