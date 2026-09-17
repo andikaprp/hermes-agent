@@ -903,10 +903,10 @@ class TurnRunner:
         if scfg is None:
             from gateway.config import StreamingConfig
             scfg = StreamingConfig()
-        # display.platforms.<plat>.streaming may disable streaming per platform; None = follow global.
-        plat_streaming = ctx.resolve_display_setting(ctx.user_config, platform_key, "streaming")
-        want_stream_deltas = (
-            scfg.enabled and scfg.transport != "off" if plat_streaming is None else bool(plat_streaming)
+        from gateway.display_config import resolve_session_streaming
+        want_stream_deltas = resolve_session_streaming(
+            ctx.user_config, platform_key, getattr(ctx.source, "chat_type", None),
+            master_enabled=scfg.enabled and scfg.transport != "off", transport=scfg.transport,
         )
         want_interim_messages = ctx.interim_assistant_messages_enabled
         if want_stream_deltas or want_interim_messages:

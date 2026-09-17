@@ -109,6 +109,12 @@ RE_TCTX = re.compile(
 RE_API = re.compile(
     r"API call #(\d+): model=(\S+) provider=(\S+) in=(\d+) out=(\d+) total=(\d+) latency=([\d.]+)s")
 RE_TOOL = re.compile(r"tool (\S+) completed \(([\d.]+)s, (\d+) chars\)")
+# Emitted by gateway/stream_consumer_latency.py. Absent from any log written before that
+# landed, so ``stream_ttft_ms`` / ``stream_transport_ms`` are simply unmeasurable on older
+# logs rather than zero — ``None`` is preserved all the way into the JSON.
+RE_FIRST_DELTA = re.compile(r"stream_first_delta turn=(\S+) chat=(\S+) since_open_ms=([\d.]+)")
+RE_FIRST_VISIBLE = re.compile(
+    r"stream_first_visible turn=(\S+) chat=(\S+) since_open_ms=([\d.]+)(?: since_first_delta_ms=([\d.]+))?")
 RE_SESSION_TAG = re.compile(r"\[(\d{8}_\d{6}_[0-9a-f]+)\]")
 
 # A gap this far above the configured quiet window cannot be a clean coalescing wait:
@@ -195,6 +201,8 @@ class LogScan:
         self.turnctx: List[Dict[str, Any]] = []
         self.api: List[Dict[str, Any]] = []
         self.tool: List[Dict[str, Any]] = []
+        self.first_delta: List[Dict[str, Any]] = []
+        self.first_visible: List[Dict[str, Any]] = []
 
 
 def scan_logs(gateway_paths: Iterable[str], agent_paths: Iterable[str]) -> LogScan:
@@ -224,6 +232,14 @@ def scan_logs(gateway_paths: Iterable[str], agent_paths: Iterable[str]) -> LogSc
                 elif (m := RE_SEND_RESPONSE.search(line)):
                     if m.group(1) == "Telegram":
                         scan.final_send.append({"ts": ts, "chat": m.group(3), "chars": int(m.group(2))})
+                elif (m := RE_FIRST_DELTA.search(line)):
+                    scan.first_delta.append({"ts": ts, "turn": m.group(1), "chat": m.group(2),
+                                             "since_open_ms": float(m.group(3))})
+                elif (m := RE_FIRST_VISIBLE.search(line)):
+                    scan.first_visible.append({
+                        "ts": ts, "turn": m.group(1), "chat": m.group(2),
+                        "since_open_ms": float(m.group(3)),
+                        "since_first_delta_ms": float(m.group(4)) if m.group(4) else None})
                 elif RE_SUPPRESS.search(line):
                     scan.suppress.append({"ts": ts})
         # WARNING: two different log names appear for the same adapter (hermes_plugins.*
@@ -269,7 +285,7 @@ def build_turns(scan: LogScan, platform: str = "telegram") -> List[Dict[str, Any
             "declared_time_s": r["time_s"], "declared_api_calls": r["api_calls"],
             "response_chars": r["response_chars"],
             "flush": [], "receipt": [], "inbound": [], "turnctx": [], "watch": [], "suppress": [],
-            "final_send": [],
+            "final_send": [], "first_delta": [], "first_visible": [],
         })
     turns.sort(key=lambda t: t["ready_ts"])
 
@@ -284,12 +300,15 @@ def build_turns(scan: LogScan, platform: str = "telegram") -> List[Dict[str, Any
     for marker_list, bucket in ((scan.flush, "flush"), (scan.receipt, "receipt"),
                                 (scan.inbound, "inbound"), (scan.turnctx, "turnctx"),
                                 (scan.watch, "watch"), (scan.suppress, "suppress"),
-                                (scan.final_send, "final_send")):
+                                (scan.final_send, "final_send"),
+                                (scan.first_delta, "first_delta"),
+                                (scan.first_visible, "first_visible")):
         for item in marker_list:
             t = owner(item["ts"])
             if t is not None:
                 t[bucket].append(item)
-    for bucket in ("flush", "receipt", "inbound", "turnctx", "watch", "suppress", "final_send"):
+    for bucket in ("flush", "receipt", "inbound", "turnctx", "watch", "suppress", "final_send",
+                   "first_delta", "first_visible"):
         for t in turns:
             t[bucket].sort(key=lambda i: i["ts"])
 
@@ -399,8 +418,25 @@ def measure_turn(turn: Dict[str, Any], quiet_seconds: Optional[float],
     else:
         message_class = "multi_batch_rapid"
 
+    # Streamed time-to-first-token, from the markers gateway/stream_consumer_latency.py emits.
+    # ``None`` on any log written before those landed (and on turns that never streamed):
+    # unmeasurable, which the aggregate must keep distinct from "measured as zero".
+    first_delta = turn["first_delta"]
+    first_visible = turn["first_visible"]
+    stream_ttft_ms = None
+    if first_delta and platform_ts is not None:
+        stream_ttft_ms = round((first_delta[0]["ts"] - platform_ts) * 1000.0, 1)
+    stream_transport_ms = first_visible[0]["since_first_delta_ms"] if first_visible else None
+    stream_first_visible_ms = None
+    if first_visible and platform_ts is not None:
+        stream_first_visible_ms = round((first_visible[0]["ts"] - platform_ts) * 1000.0, 1)
+
     api_sessions = {a["session"] for a in turn["api"]}
     return {
+        "stream_ttft_ms": stream_ttft_ms,
+        "stream_first_visible_ms": stream_first_visible_ms,
+        "stream_transport_ms": stream_transport_ms,
+        "streamed": bool(first_delta or first_visible),
         "ready_ts": turn["ready_ts"],
         "ready_at": _dt.datetime.fromtimestamp(turn["ready_ts"]).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
         "date": _dt.datetime.fromtimestamp(turn["ready_ts"]).strftime("%Y-%m-%d"),
@@ -596,6 +632,9 @@ def aggregate(measured: List[Dict[str, Any]]) -> Dict[str, Any]:
         "declared_turn_time_ms": lambda s: (s["declared_time_s"] * 1000.0) if s["declared_time_s"] is not None else None,
         "model_calls": lambda s: s["model_calls_declared"],
         "tool_calls": lambda s: s["tool_calls_agent_log"],
+        "stream_ttft_ms": lambda s: s["stream_ttft_ms"],
+        "stream_first_visible_ms": lambda s: s["stream_first_visible_ms"],
+        "stream_transport_ms": lambda s: s["stream_transport_ms"],
     }
     groups: Dict[str, List[Dict[str, Any]]] = {"all": measured}
     for s in measured:
