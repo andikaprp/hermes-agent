@@ -31,6 +31,7 @@ from gateway.response_filters import (
     is_intentional_silence_response as _is_intentional_silence_response,
     is_partial_silence_marker as _is_partial_silence_marker)
 from gateway.stream_consumer_fences import ensure_closed_code_fences
+from gateway.stream_consumer_latency import StreamLatencyMarks
 from gateway.stream_consumer_transport import StreamTransportMixin
 from gateway.stream_consumer_fallback import StreamFallbackMixin
 from gateway.stream_consumer_think import StreamThinkFilterMixin
@@ -129,6 +130,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         self._on_before_finalize = on_before_finalize
         self._initial_reply_to_id = initial_reply_to_id
         self._turn_id = str(uuid.uuid4())  # keys send_stream_frame() per concurrent consumer
+        # Time-to-first-content stopwatch; the only source of TTFT in the logs (LAB-3).
+        self.latency = StreamLatencyMarks(turn_id=self._turn_id, chat_id=chat_id)
         # Returns False after /new or /stop; run() then abandons the stream.
         self._run_still_current = run_still_current or (lambda: True)
         # Only platforms needing an explicit finalize call (DingTalk AI Cards) force a
@@ -512,6 +515,7 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         boundary: the current message is finalized and subsequent text goes out as a new
         message below any tool-progress messages."""
         if text:
+            self.latency.note_delta()
             self._queue.put(text)
         elif text is None:
             self.on_segment_break()
@@ -811,6 +815,8 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         tick.update_visible = await self._send_or_edit(
             display_text, finalize=tick.got_done or tick.got_segment_break,
             is_turn_final=tick.got_done)
+        if tick.update_visible:
+            self.latency.note_visible()
         self._last_edit_time = time.monotonic()
         # Lines stay in _tool_progress_lines for the next compose.
         self._tool_progress_active = False

@@ -903,10 +903,10 @@ class TurnRunner:
         if scfg is None:
             from gateway.config import StreamingConfig
             scfg = StreamingConfig()
-        # display.platforms.<plat>.streaming may disable streaming per platform; None = follow global.
-        plat_streaming = ctx.resolve_display_setting(ctx.user_config, platform_key, "streaming")
-        want_stream_deltas = (
-            scfg.enabled and scfg.transport != "off" if plat_streaming is None else bool(plat_streaming)
+        from gateway.display_config import resolve_session_streaming
+        want_stream_deltas = resolve_session_streaming(
+            ctx.user_config, platform_key, getattr(ctx.source, "chat_type", None),
+            master_enabled=scfg.enabled and scfg.transport != "off", transport=scfg.transport,
         )
         want_interim_messages = ctx.interim_assistant_messages_enabled
         if want_stream_deltas or want_interim_messages:
@@ -1500,6 +1500,10 @@ class TurnRunner:
         )
         ctx = self._ctx
         persist_override: Optional[Any] = ctx.persist_user_message
+        # Classified before any note is prepended: every note below breaks the anchored
+        # trivial-prompt match, and a turn that carries one is not an ordinary social reply.
+        fast_path_reason_ = self._fast_path_reason(agent_history)
+        ctx_message_at_entry = ctx.message
         self._prepend_pending_note("_pending_model_notes")
         # Auto-continue: history ending with a tool result means the previous turn was cut off
         # (restart, crash, SIGTERM). Session-level resume_pending (drain-timeout shutdown) uses
@@ -1539,7 +1543,31 @@ class TurnRunner:
         # user turn. Restricted to resume_pending sessions so caption-less image turns are untouched.
         if isinstance(ctx.message, str) and not ctx.message.strip() and resume_pending:
             ctx.message = build_resume_recovery_note(resume_reason, "", interactive=self._resume_note_interactive())
+        if fast_path_reason_ and ctx.message is ctx_message_at_entry:
+            # Only when nothing else claimed the message: a recovery or resume note means the
+            # turn has state to reconcile, which is exactly when the loop should stay open.
+            from gateway.run_turn_fast_path import apply_fast_path_note
+            persist_override = persist_override if persist_override is not None else ctx.message
+            ctx.message = apply_fast_path_note(
+                ctx.message, fast_path_reason_, chat_id=getattr(ctx.source, "chat_id", None))
+            ctx.fast_path_taken = fast_path_reason_
         return persist_override, ctx.persist_user_timestamp
+
+    def _fast_path_reason(self, agent_history) -> Optional[str]:
+        """Why this turn needs no tool surface, or None. See gateway/run_turn_fast_path.py."""
+        from gateway.run import _platform_config_key
+        from gateway.run_turn_fast_path import fast_path_reason
+        ctx = self._ctx
+        source = ctx.source
+        try:
+            platform_key = _platform_config_key(getattr(source, "platform", None))
+        except Exception:
+            return None
+        return fast_path_reason(
+            ctx.message, platform_key=platform_key,
+            chat_type=getattr(source, "chat_type", None), history=agent_history,
+            user_config=ctx.user_config,
+        )
 
     def _native_image_run_message(self):
         """Wrap the user turn as an OpenAI-style multimodal content list when
@@ -1808,6 +1836,10 @@ class TurnRunner:
         ctx.timing.mark("api_start")
         result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
         ctx.timing.mark("api_end")
+        if ctx.fast_path_taken:
+            from gateway.run_turn_fast_path import log_fast_path_outcome
+            log_fast_path_outcome(
+                ctx.fast_path_taken, result, chat_id=getattr(ctx.source, "chat_id", None))
         self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
