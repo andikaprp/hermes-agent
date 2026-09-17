@@ -397,9 +397,19 @@ def apply_fast_path_note(message: str, reason: str, *, chat_id: Any = None) -> s
     return FAST_PATH_NOTE + "\n\n" + message
 
 
-def _count_tool_calls(result: Any) -> int:
+def _count_tool_calls(result: Any, since: int = 0) -> int:
+    """Tool calls made *by this turn*, not by the whole conversation.
+
+    ``result["messages"]`` is the entire conversation — the gateway treats it that way and
+    slices the new rows with ``offset = len(agent_history)`` (see ``_sync_session_after_run``).
+    Counting all of it reports the session total: a turn that used no tools at all once logged
+    ``tool_calls=255`` because the session had 255 tool calls behind it. ``since`` is the turn
+    boundary; only rows at or after it belong to the turn. A caller that cannot know the
+    boundary gets the old whole-list behaviour, which is why every real call site passes one.
+    """
+    messages = (result or {}).get("messages") or []
     n = 0
-    for message in (result or {}).get("messages") or []:
+    for message in messages[max(0, int(since or 0)):]:
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         calls = message.get("tool_calls") or []
@@ -408,7 +418,8 @@ def _count_tool_calls(result: Any) -> int:
     return n
 
 
-def log_fast_path_outcome(reason: str, result: Any, *, chat_id: Any = None) -> None:
+def log_fast_path_outcome(reason: str, result: Any, *, chat_id: Any = None,
+                          since: int = 0) -> None:
     """Turn-end marker: whether the fast path was taken, and how many calls it used.
 
     LAB-3 could not verify "one model call, zero tools" from logs because only the routing
@@ -416,7 +427,7 @@ def log_fast_path_outcome(reason: str, result: Any, *, chat_id: Any = None) -> N
     turn's real counts, so the next measurement pass can score compliance without guessing.
     """
     api_calls = int((result or {}).get("api_calls") or 0)
-    tool_calls = _count_tool_calls(result)
+    tool_calls = _count_tool_calls(result, since=since)
     payload = {
         "marker": FAST_PATH_OUTCOME_MARKER,
         "reason": reason,

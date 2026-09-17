@@ -503,6 +503,54 @@ def test_fast_path_off_tokens(raw):
     assert is_fast_path_enabled({"gateway": {"telegram": {"fast_path": raw}}}) is False
 
 
+def test_fast_path_outcome_counts_only_this_turns_tool_calls(caplog):
+    """A long session must not make a fast-path turn look tool-heavy.
+
+    ``result["messages"]`` is the entire conversation — the gateway slices new rows with
+    ``offset = len(agent_history)`` itself. Counting all of it reported the session's lifetime
+    tool calls: a live turn that used no tools at all logged ``tool_calls=255``. The turn
+    boundary is the history length the turn started with.
+    """
+    import logging
+
+    history = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": f"old{i}"}]}
+        for i in range(120)
+    ]
+    this_turn = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "new1"}]},
+        {"role": "tool", "content": "ok"},
+        {"role": "assistant", "content": "done"},
+    ]
+    result = {"api_calls": 2, "messages": history + this_turn}
+
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        log_fast_path_outcome("social", result, chat_id="4242", since=len(history))
+
+    assert "tool_calls=1" in caplog.text       # this turn, not the session
+    assert "tool_calls=121" not in caplog.text  # the session total must never be reported
+    assert "api_calls=2" in caplog.text
+
+
+def test_fast_path_outcome_between_turns_reports_zero_for_a_tool_free_turn(caplog):
+    """The live shape that produced ``tool_calls=255``: a fast-path turn with no tools.
+
+    A boundary one row past the whole conversation is what a caller sees when the turn added
+    nothing, and it must report 0 rather than crashing or falling back to the session total.
+    """
+    import logging
+
+    result = {
+        "api_calls": 1,
+        "messages": [{"role": "assistant", "content": "", "tool_calls": [{"id": "old"}]}],
+    }
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        log_fast_path_outcome("social", result, chat_id="1", since=len(result["messages"]))
+
+    assert "tool_calls=0" in caplog.text
+
+
 def test_fast_path_outcome_records_call_counts(caplog):
     import logging
 

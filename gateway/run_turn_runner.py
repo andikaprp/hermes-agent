@@ -1838,8 +1838,13 @@ class TurnRunner:
         ctx.timing.mark("api_end")
         if ctx.fast_path_taken:
             from gateway.run_turn_fast_path import log_fast_path_outcome
+            # ``result["messages"]`` is the whole conversation; the turn's own rows start at
+            # the history length the turn began with — the same boundary _sync_session_after_run
+            # uses below to decide what to persist. Without it the outcome line reports the
+            # session's lifetime tool calls as if they were this turn's.
             log_fast_path_outcome(
-                ctx.fast_path_taken, result, chat_id=getattr(ctx.source, "chat_id", None))
+                ctx.fast_path_taken, result, chat_id=getattr(ctx.source, "chat_id", None),
+                since=len(agent_history))
         self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
