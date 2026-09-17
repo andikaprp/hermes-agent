@@ -82,6 +82,15 @@ OVERRIDEABLE_KEYS = frozenset(_GLOBAL_DEFAULTS.keys())
 # indicator for the whole turn (LAB-3 measured p50 16.3 s / p90 50.6 s to first send, and 8 of
 # 20 sampled turns sent exactly one message). Group chats stay off the default: progressive
 # edits in a shared channel are noise, and they burn the same per-chat flood budget.
+#
+# This closes a disagreement between two default tables rather than inventing a policy.
+# ``hermes_cli/config_defaults.py`` already declares ``display.platforms.telegram.streaming:
+# True``, but the gateway loads user YAML with no DEFAULT_CONFIG merge
+# (``gateway/run.py::_load_gateway_config``), so that default only reaches a turn when it is
+# literally on disk — a config.yaml predating it, or a hand-written minimal one, silently gets
+# no streaming. The tier table here is what the gateway actually reads, and it said "follow
+# global", which defaults off. Taking DMs only keeps this strictly more conservative than the
+# CLI-side default, which claims every Telegram chat.
 _DM_STREAMING_DEFAULT_PLATFORMS = frozenset({"telegram"})
 _DM_CHAT_TYPES = frozenset({"dm", "private"})
 

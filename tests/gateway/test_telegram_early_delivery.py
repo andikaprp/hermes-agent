@@ -50,6 +50,20 @@ def test_telegram_root_dm_streams_with_no_configuration():
     assert resolve_session_streaming({}, "telegram", "private", master_enabled=False) is True
 
 
+def test_the_gateway_default_agrees_with_the_cli_default_it_never_merges():
+    """The two default tables must not disagree about whether a Telegram DM streams.
+
+    ``hermes_cli/config_defaults.py`` declares it on; the gateway resolves through this module
+    with no DEFAULT_CONFIG merge, so a config.yaml that predates that declaration reaches the
+    turn with nothing set. This asserts the relationship between the two, not either value.
+    """
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    declared = (DEFAULT_CONFIG["display"]["platforms"].get("telegram") or {}).get("streaming")
+    resolved = resolve_session_streaming({}, "telegram", "dm", master_enabled=False)
+    assert resolved is bool(declared)
+
+
 def test_telegram_group_is_not_swept_into_the_dm_default():
     """Progressive edits in a shared channel are noise and burn the same flood budget."""
     assert resolve_session_streaming({}, "telegram", "group", master_enabled=False) is False
