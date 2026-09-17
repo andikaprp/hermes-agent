@@ -67,3 +67,21 @@ def test_group_keeps_adaptive_fast_path():
     pending = _event("group")
     delay = adapter._text_batch_delay_for(pending)
     assert delay <= 0.3
+
+
+def test_quiet_window_knobs_have_class_defaults_so_the_flush_task_cannot_crash():
+    """Every knob ``_text_batch_delay_for`` reads must resolve without ``__init__``.
+
+    It runs inside the flush task, where an AttributeError becomes a never-retrieved task
+    exception and the buffered burst is dropped silently. The class defaults must also agree
+    with what ``__init__`` writes, or the pre-init window would batch on different rules.
+    """
+    from plugins.platforms.telegram.adapter import TelegramAdapter
+
+    pristine = object.__new__(TelegramAdapter)
+    delay = pristine._text_batch_delay_for(_event("dm"))
+    assert isinstance(delay, float) and delay >= 0.0
+
+    configured = TelegramAdapter(PlatformConfig(enabled=True, token="test-token"))
+    for knob in ("_conversational_dm_batching", "_text_batch_quiet_seconds", "_text_batch_max_wait_seconds"):
+        assert getattr(pristine, knob) == getattr(configured, knob)
