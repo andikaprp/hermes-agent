@@ -14,7 +14,28 @@ from typing import Any, Optional
 from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
 from gateway.stream_consumer_fences import ensure_closed_code_fences
 
+try:  # never let a formatting helper break a stream: identity is the safe fallback
+    from gateway.delivery_voice import normalize_stream_dashes as _normalize_stream_dashes
+except Exception:  # pragma: no cover - delivery_voice imports only `re`; defensive
+    def _normalize_stream_dashes(text: str) -> str:  # type: ignore[misc]
+        return text
+
 logger = logging.getLogger("gateway.stream_consumer")
+
+
+def _normalize_frame_dashes(text: str) -> str:
+    """Dash-normalize one stream frame; ANY failure sends the frame unchanged.
+
+    A formatting helper must never delay, reorder or drop a frame, so this mirrors
+    the swallow-don't-fail discipline of gateway/naturalness_voice.py rather than
+    letting a measurement take the send down with it.
+    """
+    try:
+        return _normalize_stream_dashes(text)
+    except Exception:
+        logger.debug("Stream dash normalization failed; sending the frame unchanged",
+                     exc_info=True)
+        return text
 
 
 class StreamTransportMixin:
@@ -309,6 +330,11 @@ class StreamTransportMixin:
         last edit.  Transport order: native frame → draft frame → edit existing → first
         send; a transport returns None to fall through to the next."""
         text = self._clean_for_display(text)
+        # The dash guard the final send runs (gateway.platforms.base.send_final_ledgered ->
+        # final_delivery_voice_check) is SUPPRESSED on a turn the model streamed, so the raw
+        # frames are what the user reads: normalize dashes here or the glyph ships. Dash-only
+        # on purpose — stripping scaffolding would remove content from a growing preview.
+        text = _normalize_frame_dashes(text)
         # Stream-is-the-message draft frames must stay prefix-stable: a closing ```
         # on a mid-code-block frame makes frame N not a prefix of N+1 and the
         # connector re-appends the whole snapshot.  The final is still fence-closed.
