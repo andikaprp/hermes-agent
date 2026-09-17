@@ -474,6 +474,16 @@ class SessionMessagesMixin:
         row = self._read_one("SELECT role FROM messages WHERE id = ? AND session_id = ? AND active = 1", (int(row_id), session_id))
         return row[0] if row else None
 
+    def message_platform_id(self, session_id: str, row_id: int) -> Optional[str]:
+        """Platform message id stored on the active row *row_id*, or ``None``. The id a platform-side
+        action (a reaction on the user's bubble) has to name gets looked up from the row it belongs to."""
+        if not session_id or row_id is None:
+            return None
+        row = self._read_one(
+            "SELECT platform_message_id FROM messages WHERE id = ? AND session_id = ? AND active = 1",
+            (int(row_id), session_id))
+        return row[0] if row and row[0] is not None else None
+
     def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
         """Insert *messages* as fresh active rows in the caller's txn -> ``(inserted, tool_call_count)``.
         Never touches sessions.* counters (callers reconcile differently); reasoning kept for assistant rows."""
