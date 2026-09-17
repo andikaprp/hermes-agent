@@ -89,6 +89,46 @@ def test_directive_words_never_take_the_fast_path(text):
         assert classify_fast_path(text, history=history) is None
 
 
+def test_a_timestamp_rendered_message_is_still_classified():
+    """Production prepends a timestamp render to every inbound user message.
+
+    ``gateway.message_timestamps.enabled`` is on for this deployment, so the classifier is
+    handed ``[Thu 2026-09-17 21:54:28 WIB] hi``, not ``hi``. That leading ``[`` used to read
+    as a machine work trigger, which meant *every* live message was judged not-ordinary and
+    the fast path never fired in production — while every test here passed, because every
+    test passes a clean string.
+    """
+    from zoneinfo import ZoneInfo
+
+    from gateway.message_timestamps import render_user_content_with_timestamp
+
+    tz = ZoneInfo("Asia/Jakarta")
+    for text, expected in (("hi", "social"), ("ok", "ack"), ("thanks", "social"),
+                           ("oke nice", "ack"), ("ya", "ack")):
+        rendered = render_user_content_with_timestamp(text, 1758113668.0, tz=tz)
+        assert rendered.startswith("[") and rendered.endswith(text), rendered
+        assert classify_fast_path(rendered, history=ASSISTANT_STATED) == expected, rendered
+
+
+def test_stripping_the_timestamp_does_not_blunt_the_machine_trigger_guard():
+    """The one test that keeps the timestamp fix from becoming a hole.
+
+    Stripping the render must leave a real bracketed machine notice still rejected.
+    """
+    from zoneinfo import ZoneInfo
+
+    from gateway.message_timestamps import render_user_content_with_timestamp
+
+    tz = ZoneInfo("Asia/Jakarta")
+    for text in (
+        "[ASYNC DELEGATION BATCH 3] check the results",
+        "[IMPORTANT: Background process completed] report to user",
+        "[cron] nightly backup finished",
+    ):
+        rendered = render_user_content_with_timestamp(text, 1758113668.0, tz=tz)
+        assert classify_fast_path(rendered, history=None) is None, rendered
+
+
 @pytest.mark.parametrize("text", ["done", "done?"])
 def test_done_stays_off_the_fast_path_deliberately(text):
     """Deliberate, not a miss. Do not "fix" this.
