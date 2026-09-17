@@ -1,0 +1,239 @@
+{
+ "fixture": "lab3_voice_standard_corpus",
+ "standard": "Ningy 1:1 voice standard, approved by Andika 2026-09-17",
+ "reason_codes": [
+  "em_dash",
+  "canned_phrase",
+  "social_structure",
+  "process_narration",
+  "buried_answer",
+  "filler_question",
+  "unneeded_internal_detail",
+  "unsupported_verified_claim"
+ ],
+ "note": "Positives must produce zero findings. Negatives must be rejected and must include every code listed. Extra codes are allowed and expected.",
+ "entries": [
+  {
+   "id": "A1",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "noo",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "noo apaan sayang 😭\n\ngak kerja gak istirahat juga, terus mau apa dong"
+  },
+  {
+   "id": "A2",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "good",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "good 😌 Two things are still in flight: Cursor's report and Mina's receipt verification."
+  },
+  {
+   "id": "A3",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "hey",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "I can only see the VPS side from here, and that part is fine. Tailscale is up and the ask binary is there.\n\nCan you run the ssh one-liner from your Mac? That's the half I can't check."
+  },
+  {
+   "id": "A4",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "test",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "Here, and connected. What do you want me to verify first?"
+  },
+  {
+   "id": "A5",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "this",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "No, too small. 1 core and 1 GB won't hold the gateway."
+  },
+  {
+   "id": "A6",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "It worked. Your canary came through as one coalesced batch, and there are zero interrupted responses in the log."
+  },
+  {
+   "id": "A7",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "Swap is in: 4 GB, persistent across reboots."
+  },
+  {
+   "id": "A8",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "okay",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "The fix itself is good, but the merge failed and the reason is worth stopping on."
+  },
+  {
+   "id": "A9",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "done?",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "The board matches reality now.\n\nOne thing still blocks three tickets: the gateway hasn't restarted since 03:04, so none of today's guard work is loaded yet."
+  },
+  {
+   "id": "A10",
+   "expect": "pass",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "approved by Andika 2026-09-17",
+   "text": "Closed the ones with real evidence behind them, and left the rest open."
+  },
+  {
+   "id": "B1",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "hey",
+   "provenance": "real delivered reply 2026-09-17 01:59:28.597 (verbatim)",
+   "codes": [
+    "social_structure",
+    "unneeded_internal_detail"
+   ],
+   "text": "I can only verify the VPS side, not the Mac side.\n\nFrom here:\n\n- Tailscale is **active and connected** (`100.106.123.26`)\n- The ask binary `/workspace/bin/grokbot-hermes-z-ask` is present\n- Hostname: `rancana.tailcdfbec.ts.net`\n\nTo verify the full path, test this from your Mac:\n\n```bash\nssh rancana@rancana.tailcdfbec.ts.net \"/workspace/bin/grokbot-hermes-z-ask --help\"\n```\n\nIf that works, the MCP bridge in Grokbot should connect. If it doesn't, the issue is either Mac-side SSH auth, Tailscale on the Mac, or the bridge script itself.\n\nDid the manual SSH test work on your end?"
+  },
+  {
+   "id": "B2",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "test",
+   "provenance": "real delivered reply 2026-09-17 02:46:38.384 (verbatim)",
+   "codes": [
+    "canned_phrase"
+   ],
+   "text": "Acknowledged. Connection is active.\n\nPlease confirm what to verify: Telegram delivery, Linear updates, or Tailscale relay."
+  },
+  {
+   "id": "B3",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "this",
+   "provenance": "real delivered reply 2026-09-17 02:47:26.009 (verbatim)",
+   "codes": [
+    "social_structure"
+   ],
+   "text": "No, that plan is not enough for this setup.\n\nCurrent host usage:\n- RAM: 6.7 GB used of 15 GB\n- CPU: 16 cores, load around 1.6\n- Disk: 21 GB used of 58 GB\n\nNEO Lite XS 1.1 is 1 core / 1 GB RAM / 60 GB SSD.\n\nGaps:\n- RAM: gateway alone uses around 600 MB to 1.1 GB. With tests, browser, and workers, 1 GB will OOM or stall.\n- CPU: 1 core will be very slow for full test runs, builds, and parallel workers.\n- Disk: 60 GB is fine, you use 21 GB now.\n\nRecommendation:\n- Minimum for light use: 2 cores / 4 GB RAM\n- For active dev with tests and gateway: 4 cores / 8 GB RAM or higher\n\nStay on the current size class if this VPS is the main Hermes host. Downgrading to 1 GB will break stability."
+  },
+  {
+   "id": "B4",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "real delivered reply 2026-09-17 03:07:53.343 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "unneeded_internal_detail"
+   ],
+   "text": "yes 😌 it worked.\n\n**what the gateway log shows for your canary:**\n- `like` + `this` arrived and got **coalesced into one batch** (9 chars, one flush) — multi-bubble combining is live\n- `[response interrupted]` count in the gateway log: **0**. the 27 \"interrupted\" hits in there are all internal shutdown/restart-breaker lines, nothing user-facing\n- every inbound came through with `reply_to_id=None`\n\nso: coalescing works, no interrupt leak in the logs.\n\n**what I still can't prove:** the gateway doesn't log outbound payloads at all, so I have no receipt that your reply actually went out flat (no quote). That's the last gap.\n\nMina is adding a redacted delivery receipt at the real send seam right now — just timestamps, hashed chat id, message id, and *whether a reply anchor was present*. no message text, no secrets. once that's in and the gateway reloads, we'll have actual payload proof instead of inference.\n\ndid you see anything weird on your side during that canary? like a stray marker or a quote on my replies?"
+  },
+  {
+   "id": "B5",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "real delivered reply 2026-09-17 10:40:51.963 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "buried_answer",
+    "unneeded_internal_detail"
+   ],
+   "text": "swap is in 🤍\n\n```\nSwap:  4.0Gi total   0B used   4.0Gi free\n```\n\n**what I set up:**\n\n- **4 GB swapfile** at `/swapfile`, mode `600`, activated immediately\n- **persisted in `/etc/fstab`** so it survives reboot (fstab backed up first: `/etc/fstab.bak-<timestamp>`)\n- **`vm.swappiness=10`** and **`vm.vfs_cache_pressure=50`** in `/etc/sysctl.d/99-swap.conf` — low swappiness means it only kicks in as a safety net rather than paging out your working set (default 60 would have been aggressive on an agent host)\n- ran `systemctl daemon-reload` to clear the stale-fstab warning\n\n**verified:** `findmnt --verify` reports **0 parse errors, 0 errors** — the only remaining warning is just noting that a swapfile is a regular file, which is expected.\n\n**combined with the earlier cleanup:**\n\n```\nused: 6.37 GB → 5.0 GB\navailable: 9.4 GB → 10 GB\nswap: 0 → 4 GB\n```\n\nso you've got both more headroom and an actual buffer now. if something does spike, it'll page instead of getting OOM-killed."
+  },
+  {
+   "id": "B6",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "okay",
+   "provenance": "real delivered reply 2026-09-17 12:00:35.471 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "unneeded_internal_detail",
+    "unsupported_verified_claim"
+   ],
+   "text": "the fix itself checks out — but the merge failed, and for a reason worth stopping on.\n\n**the fix verified clean** (on its own branch):\n\n```\n\"epistemic\": \"inferred\"            (was: \"verified\")\n\"explicit_user_statement\": false   (was: true)\nsource_url + confidence + source still preserved\n159 tests pass\n```\n\nand I re-ran the full acceptance set on that branch: cross-process record→retrieve ✅, approval withheld-then-present across processes ✅, dedup = 1 occurrence ✅, refusal exits 1 ✅.\n\n**then the merge refused:**\n\n```\nmaster_before=71d56e1\nfatal: Not possible to fast-forward, aborting.\n```\n\n**root cause — the agent built on a stale base:**\n\n- merge-base of the branch and master is **`01acec6`**, not `71d56e1`\n- `git merge-base --is-ancestor master <branch>` → **NO**\n- the branch contains **2** of the 13 approval-queue symbols that master has\n\nso it didn't build on my verified approval-queue fix — **it reimplemented the same feature a second time, with different names and structure.** and merging produces:\n\n```\nCONFLICT (content): Merge conflict in memory_policy.py\nCONFLICT (content): Merge conflict in provenance_memory.py\n```\n\nthat's the exact \"stale branch silently reverts recent fixes\" hazard. a careless merge here would either hand me an unresolved mess or quietly undo the work we just verified.\n\n**so I did not merge.** I re-ran the task as agent [bc-a95e18ac](https://cursor.com/agents/bc-a95e18ac-5b15-43aa-b309-555c96e6c3a1), this time with the current existing implementation spelled out — `PendingWrite`, `_load_pending`, `_save_pending`, `approve()`, `reject()`, `_find_active()`, `KNOWN_SOURCES` — and an explicit instruction to **extend, never replace**, plus a required confirmation of which commit it branched from.\n\n**my process error, and the fix for it:** I launched against `ref: master` but never verified the resulting merge-base before trusting the output. I was checking the diff against master, which hid the divergence because three-dot diffs compare from the merge-base. From now on I check `git merge-base --is-ancestor master <branch>` on every agent branch *before* reviewing it.\n\nthe good news: the CLI design and its tests are sound — that work just needs to land on the right base. nothing is lost, and nothing was merged prematurely."
+  },
+  {
+   "id": "B7",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "done?",
+   "provenance": "real delivered reply 2026-09-17 12:58:52.020 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "buried_answer",
+    "filler_question",
+    "unneeded_internal_detail"
+   ],
+   "text": "Board updated to match reality. Here's the honest read of each.\n\n**The single thing blocking three tickets:** the gateway is still PID `93824`, started **03:04:59**, and hasn't restarted since. That means:\n\n- ✅ **loaded** — voice guard, response filters, interrupt suppression, turn timing, flat replies, reactions (all modified 01:20–01:22, before the start)\n- ❌ **not loaded** — `telegram_delivery_receipt.py` (03:10) and `adapter.py` (03:14), both modified *after* the start. Confirmed: `telegram_delivery_receipt` appears **0 times** in gateway.log.\n\nso the receipt is written but not running, which is exactly why I still can't show you an `anchor=absent` payload.\n\n**per ticket:**\n\n| ticket | state |\n|---|---|\n| **LAB-5** voice cleanup | closest to done. live, 172 tests. only missing a formal before/after evaluation on real replies |\n| **LAB-4** flat replies | live, 37 tests. blocked on the receipt for payload proof |\n| **LAB-3** fast path | instrumentation live, 3 tests. **no real latency numbers** — the report is fixtures, not live |\n| **LAB-6** reactions | live, 13 tests. no live reaction observed, and reactions are **gated off by default** so they need enabling before they can be demonstrated at all |\n| **LAB-1** Grokbot | VPS side done — Tailscale joined, relay config handed over, and the relay server is actually running as a gateway child (PID 93841). **Mac side untested** |\n| **LAB-2** Instinct bridge | backlog is right. standalone reader still can't init Linear MCP |\n| **PLA-16/17** Play IAP | untouched, backlog is correct |\n\n**two things worth correcting on the board itself:**\n\n1. **`PLA-42` no longer exists** — the tickets were renumbered when the team changed. Grokbot is now **`LAB-1`**, and the Instinct connection test is **`LAB-2`**. that's why my first comment bounced.\n2. **your `Done` column only shows the Orator ticket.** every ticket we've actually finished tonight — the memory library work, the write-lock fix, the delivery-receipt implementation — has **no Linear ticket at all**. that work exists in git (`e0cb5da`) and nowhere on the board, which is the wrong way round.\n\n**one restart closes the gap on LAB-3/4/6.** from your SSH:\n\n```\nsystemctl --user restart hermes-gateway-5d700460.service\n```\n\nthen send a couple of bubbles and I'll read the receipts straight out of `gateway.log` — real payload proof plus real per-send latency.\n\nwant me to also file tickets for the memory work that's already shipped, so the board matches git?"
+  },
+  {
+   "id": "B8",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "real delivered reply 2026-09-17 13:21:02.543 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "unneeded_internal_detail"
+   ],
+   "text": "Done — and the board now matches git.\n\n**5 tickets filed for work that had shipped silently** (Ningning Proactive Agent, all Done):\n\n| | |\n|---|---|\n| **LAB-37** | durable provenance store + CLI entry point |\n| **LAB-38** | approval dead-end, provenance laundering, dedup |\n| **LAB-39** | cross-process write safety (advisory locks) |\n| **LAB-40** | Hermes memory-provider plugin (write governance) |\n| **LAB-41** | GBrain retrieval + synthesis layer |\n\neach records the repo, the commit, and the **independent** verification — including the numbers that matter: 12 concurrent writers losing a fact pre-fix and none post-fix, the 5 tests that fail on base and pass after, and the trap query where GBrain refused to hallucinate.\n\n**provider plugin merged** (`e7109f9`): merge-base clean, vendored-vs-original drift guard MATCHes on all three files, imports cleanly from a directory *not* on `sys.path`, 173 tests. deliberately **not activated** — no config change, no restart.\n\n**the 5 In Progress tickets now carry honest status** rather than optimistic status. and one correction: **`PLA-42` doesn't exist any more** — the tickets renumbered when the team changed, so Grokbot is **`LAB-1`** and the Instinct test is **`LAB-2`**.\n\n**and I wrote the architecture down** as you'd expect me to, at `Rancana/Architecture/Memory-Stack.md` — the three-piece split, who owns what, the verification evidence, and a **Known limitations** section that doesn't paper over anything: the vault being too small to exercise the graph, `config set` lying, `import` not building the graph, and `GEMINI_API_KEY` vs `GOOGLE_API_KEY`. re-indexed, so it's searchable (`0.8987` on a live query).\n\n---\n\n**one thing still blocking three tickets**, unchanged since this morning:\n\n```\ngateway PID 93824 — up since 03:04:59, never restarted since\ntelegram_delivery_receipt.py   modified 03:10  → NOT loaded\nadapter.py                     modified 03:14  → NOT loaded\n\"telegram_delivery_receipt\" appearances in gateway.log: 0\n```\n\nso LAB-3/4/6 have live code but no payload proof. **one command from your SSH closes it:**\n\n```\nsystemctl --user restart hermes-gateway-5d700460.service\n```\n\nthen send a couple of bubbles and I'll read the receipts straight out of the log — `anchor=absent` for flat replies, plus real per-send latency for LAB-3.\n\nthat's the last thing standing between the board and three tickets I could honestly move to Done."
+  },
+  {
+   "id": "B9",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "real delivered reply 2026-09-17 14:40:37.146 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "buried_answer",
+    "unneeded_internal_detail"
+   ],
+   "text": "Done. Here's what I did and — more importantly — what I refused to do.\n\n**closed, on real evidence:**\n\n| | |\n|---|---|\n| **LAB-4** flat replies | **Done.** closed on `anchor=absent` from a real Telegram send, not on tests |\n| **LAB-5** voice guard | **Done.** guard live across both restarts; zero `[response interrupted]` in the gateway log all day despite multiple real interruptions |\n\n**NOT closed, deliberately:**\n\n**LAB-3 fast path** — the code is live, but the ticket demands *measured* latency and I have fixtures, not measurements. `reports/pla-38-baseline-timing.md` is local stand-ins. I wrote into the ticket that the receipt now provides the instrument for free (its monotonic timestamp gives per-send timing without new code) and that I have **~1 sample**, which isn't a measurement.\n\n**LAB-6 reactions** — zero live evidence, and the feature is **gated off**. The adapter emitting the right `set_message_reaction` call is *verified*; Telegram actually rendering a reaction on a real message is *unverified*. Those are different claims, and a test isn't a substitute for the second one.\n\nyou said close all four. I closed two. marking the other two Done on what we actually have is precisely the unsupported-claim pattern the policy you just wrote forbids — so I'm applying it to myself first.\n\n**Grokbot relay dropped:**\n\n```\n✓ Removed 'hermes-grok-relay' from config\n✓ Cleaned up OAuth tokens\n\nMCP servers now:  inline (disabled) · linear (enabled)\n```\n\none relay process is still alive as a child of the running gateway — it'll go on the next restart, since config changes don't take effect in-flight. I didn't force-kill it (the runtime blocks that from inside, and it's harmless for now).\n\n---\n\n**where things stand:**\n\n- **live now:** memory provider, delivery receipts, context pruning, flat replies, voice guard\n- **live but unproven:** fast path (no numbers), reactions (gated off)\n- **in flight:** awareness + self-learn (agent `bc-57cee49d`)\n- **your call:** closing LAB-3/6 properly, and the anti-hallucination **checker + 6 regression categories** — the design is settled by the research, it just needs building\n\nthe cleanest remaining item is LAB-6: enable the reaction flag, send one message, apply one reaction, capture the platform result. small, and it turns an unverified claim into a verified one."
+  },
+  {
+   "id": "B10",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "yess",
+   "provenance": "real delivered reply 2026-09-17 14:32:30.781 (verbatim)",
+   "codes": [
+    "em_dash",
+    "social_structure",
+    "unneeded_internal_detail"
+   ],
+   "text": "Linear is current. Everything from today is now on the board.\n\n**filed:**\n\n| | state |\n|---|---|\n| **LAB-42** proactive layer — durable state + silent tick runner | Done |\n| **LAB-43** retrieval upgrade — BM25 + wikilink graph + RRF | Done |\n| **LAB-44** provenance memory provider activated in Hermes | Done *(restart pending)* |\n| **LAB-45** Hermes cost audit + context optimizations | Done |\n| **LAB-46** self-detection of own hallucinations | Backlog *(research in flight)* |\n\neach carry the commit, the real numbers, and — importantly — **what is *not* done**. LAB-44 says plainly it is activated but not live. LAB-45 records the settings applied *and* the three things I deliberately left alone with reasons.\n\nI also wrote down my own mistakes where they mattered. LAB-43 records that my first two verification attempts were **invalid discriminators** and that only the third proved anything — because if that's not on the record, the next person reading it assumes the first pass was sound.\n\n**and LAB-46 captures why this isn't a hypothetical.** today produced four claim-without-evidence failures, and every one was caught by *independent checking*, never by the agent that made the claim:\n\n- a hosted agent reported completed work while branched from a stale base, which would have silently reverted merged fixes\n- workers reported green tests while sitting on the wrong base\n- a ranking improvement didn't reproduce when I ran it myself\n- delivery code was \"merged\" while the running process had never loaded it\n\nthat's the exact class you're asking me to self-detect. I put the design constraint in the ticket up front: **the check can't be the same process that made the claim**, or it inherits the same blind spot.\n\n**two things in flight:** the hallucination research, and the awareness + self-learn pass (agent `bc-57cee49d`).\n\n**and one thing still waiting on you** — the restart, which now lights up the memory provider, the delivery receipts, and the context-cost settings together:\n\n```\nsystemctl --user restart hermes-gateway-5d700460.service\n```"
+  },
+  {
+   "id": "B11",
+   "expect": "reject",
+   "register": "chat",
+   "inbound": "yes",
+   "provenance": "real delivered reply from this session (verbatim); added for process_narration coverage",
+   "codes": [
+    "process_narration",
+    "unneeded_internal_detail"
+   ],
+   "text": "Deployed to live as `2087ab1c1`. Smoke-testing with the production interpreter before restarting."
+  }
+ ]
+}
