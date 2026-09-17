@@ -40,6 +40,9 @@ class TurnContext:
     _progress_metadata: Optional[dict] = None
     _progress_reply_to: Optional[Any] = None
     message: Optional[str] = None  # the only rebindable field
+    # Set when the no-task Telegram DM note was prepended; consumed at turn-end to log
+    # fast_path_outcome (api_calls / tool_calls). None = this turn did not take the fast path.
+    fast_path_taken: Optional[str] = None
     # turn parameters / config snapshots (read-only in run_sync)
     history: Any = None
     context_prompt: Optional[str] = None

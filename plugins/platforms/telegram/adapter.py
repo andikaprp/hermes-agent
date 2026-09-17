@@ -416,6 +416,14 @@ class TelegramAdapter(BasePlatformAdapter):
     _TEXT_BATCH_SHORT_LEN = 1024
     _TEXT_BATCH_SHORT_DELAY_S = 0.24
 
+    # Conversational-DM quiet window, mirrored from the ``__init__`` config reads below.
+    # ``_text_batch_delay_for`` runs inside the flush task, where an AttributeError is swallowed
+    # into a never-retrieved task exception and the buffered burst is lost with no user-visible
+    # error — so every knob it reads needs a class-level value, not only an instance one.
+    _conversational_dm_batching: bool = False
+    _text_batch_quiet_seconds: float = 2.0
+    _text_batch_max_wait_seconds: float = 5.0
+
     @staticmethod
     def _env_float_clamped(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
         """Read a float env var; non-finite → default; clamp to bounds (safe for asyncio.sleep)."""

@@ -2514,10 +2514,11 @@ class GatewayTurnMixin:
         if _scfg is None:
             from gateway.config import StreamingConfig
             _scfg = StreamingConfig()
-        from gateway.display_config import resolve_display_setting
-        _plat_streaming = resolve_display_setting(_load_gateway_config(), _platform_config_key(source.platform), "streaming")
-        _streaming_enabled = (
-            _scfg.enabled and _scfg.transport != "off" if _plat_streaming is None else bool(_plat_streaming)
+        from gateway.display_config import resolve_session_streaming
+        _streaming_enabled = resolve_session_streaming(
+            _load_gateway_config(), _platform_config_key(source.platform),
+            getattr(source, "chat_type", None),
+            master_enabled=_scfg.enabled and _scfg.transport != "off", transport=_scfg.transport,
         )
         if not _streaming_enabled:
             return None

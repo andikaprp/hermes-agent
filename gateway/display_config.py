@@ -77,6 +77,47 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
 # Canonical set of per-platform overrideable keys (for validation).
 OVERRIDEABLE_KEYS = frozenset(_GLOBAL_DEFAULTS.keys())
 
+# Platforms whose DM sessions stream by default when nothing else decided. Without a stream
+# consumer the first outbound of a turn IS the turn-final send, so a DM user watches a typing
+# indicator for the whole turn (LAB-3 measured p50 16.3 s / p90 50.6 s to first send, and 8 of
+# 20 sampled turns sent exactly one message). Group chats stay off the default: progressive
+# edits in a shared channel are noise, and they burn the same per-chat flood budget.
+#
+# This closes a disagreement between two default tables rather than inventing a policy.
+# ``hermes_cli/config_defaults.py`` already declares ``display.platforms.telegram.streaming:
+# True``, but the gateway loads user YAML with no DEFAULT_CONFIG merge
+# (``gateway/run.py::_load_gateway_config``), so that default only reaches a turn when it is
+# literally on disk — a config.yaml predating it, or a hand-written minimal one, silently gets
+# no streaming. The tier table here is what the gateway actually reads, and it said "follow
+# global", which defaults off. Taking DMs only keeps this strictly more conservative than the
+# CLI-side default, which claims every Telegram chat.
+_DM_STREAMING_DEFAULT_PLATFORMS = frozenset({"telegram"})
+_DM_CHAT_TYPES = frozenset({"dm", "private"})
+
+
+def resolve_session_streaming(
+    user_config: dict, platform_key: str, chat_type: str | None, *,
+    master_enabled: bool, transport: str | None = None,
+) -> bool:
+    """Whether THIS session streams, resolved from the session's own chat type.
+
+    Precedence: operator config (``display.platforms.<p>.streaming``) → platform tier default →
+    DM default for ``_DM_STREAMING_DEFAULT_PLATFORMS`` → the top-level ``streaming`` master
+    switch. Only the DM default is new; it yields to ``transport: off``, which is an operator
+    saying no, and to either explicit setting above it.
+    """
+    configured = _configured_display_value(user_config, platform_key, "streaming")
+    if configured is not None:
+        return bool(_normalise("streaming", configured))
+    tier = _PLATFORM_DEFAULTS.get(platform_key, {}).get("streaming")
+    if tier is not None:
+        return bool(tier)
+    if (platform_key in _DM_STREAMING_DEFAULT_PLATFORMS
+            and str(chat_type or "").lower() in _DM_CHAT_TYPES
+            and str(transport or "").lower() != "off"):
+        return True
+    return bool(master_enabled)
+
 
 def resolve_display_setting(user_config: dict, platform_key: str, setting: str, fallback: Any = None) -> Any:
     """Resolve a display setting with per-platform override support (see module docstring for order).
