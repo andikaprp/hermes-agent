@@ -1570,6 +1570,10 @@ class TurnRunner:
                 text,
                 register="social" if ctx.fast_path_taken else "chat",
                 chat_id=getattr(ctx.source, "chat_id", None),
+                # His message licenses technical detail when he asked to check, for a status
+                # or for evidence. ctx.message is the turn's user text; a prepended system
+                # note rides along, which is harmless because none of them use those words.
+                inbound=ctx.message if isinstance(ctx.message, str) else "",
             )
         except Exception:
             logger.debug("voice shadow scoring failed", exc_info=True)

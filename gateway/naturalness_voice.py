@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,15 @@ _LIVE_EVIDENCE = re.compile(
     re.I,
 )
 
+# The one condition that licenses technical detail in a 1:1 reply: he asked for it. Matched on
+# HIS message only, never on the reply, so a reply cannot license itself by using the words.
+_EVIDENCE_REQUEST = re.compile(
+    r"\b(?:check|status|receipts?|evidence|prove|proven|verify|verification|confirm|"
+    r"reports?|logs?|details?|explain|summar(?:y|ise|ize)|update me|show me|"
+    r"walk me through|how do you know|what changed|did it work|numbers|breakdown)\b",
+    re.I,
+)
+
 # A line that renders as structure rather than prose. What hides an answer is a header,
 # fence, table row, bullet or bold label sitting ahead of the first prose line, not how long
 # the answer's first sentence happens to be.
@@ -157,23 +166,36 @@ def _internal_hits(text: str) -> list[str]:
     return [name for name, pattern in _INTERNAL if pattern.search(text)]
 
 
+def inbound_asks_for_evidence(inbound: Any) -> bool:
+    """Whether his message licensed technical detail: a check, a status, receipts, evidence.
+
+    Named apart from ``audit_voice``'s ``asks_for_evidence`` parameter so the parameter cannot
+    shadow the function inside the body.
+    """
+    return bool(_EVIDENCE_REQUEST.search(inbound)) if isinstance(inbound, str) else False
+
+
 def audit_voice(
     text: str,
     *,
     register: str = REGISTER_CHAT,
     inbound: str = "",
-    asks_for_evidence: bool = False,
+    asks_for_evidence: Optional[bool] = None,
 ) -> list[Finding]:
     """Return every voice-standard finding for one reply, in reason-code order.
 
-    ``register`` is the turn type: a social/ack turn or an ordinary chat turn. Pass
-    ``asks_for_evidence=True`` when he explicitly asked for the internals, which is the
-    one condition that licenses technical detail in a 1:1 reply.
+    ``register`` is the turn type: a social/ack turn or an ordinary chat turn. Pass ``inbound``
+    and licensing is decided for you: a message that asked to check, for status, receipts or
+    evidence licenses technical detail, which is the one condition that allows it in a 1:1
+    reply. ``asks_for_evidence`` overrides that derivation when a caller already knows.
     """
     findings: list[Finding] = []
     stripped = text.strip()
     if not stripped:
         return findings
+
+    if asks_for_evidence is None:
+        asks_for_evidence = inbound_asks_for_evidence(inbound)
 
     for match in _EM_DASH.finditer(stripped):
         findings.append(Finding("em_dash", f"em dash at char {match.start()}"))
@@ -258,7 +280,7 @@ def audit_corpus(entries: Iterable[dict]) -> dict:
 
 
 def codes_for(text: str, *, register: str = REGISTER_CHAT, inbound: str = "",
-              asks_for_evidence: bool = False) -> Sequence[str]:
+              asks_for_evidence: Optional[bool] = None) -> Sequence[str]:
     """Convenience: the reason codes for one reply."""
     return [f.code for f in audit_voice(text, register=register, inbound=inbound,
                                         asks_for_evidence=asks_for_evidence)]
@@ -298,22 +320,27 @@ def is_voice_shadow_enabled(user_config: Any = None) -> bool:
 
 
 def log_voice_shadow(text: Any, *, register: str = REGISTER_CHAT,
-                     chat_id: Any = None) -> Sequence[str]:
+                     chat_id: Any = None, inbound: str = "") -> Sequence[str]:
     """Score an outgoing reply and log the reason codes. Never blocks and never rewrites.
 
+    ``inbound`` is his message for this turn: technical detail is licensed when he asked to
+    check, for a status, or for evidence, and without it every receipt reads as a violation.
     Returns the codes so a test can assert on them without reading the log. Deliberately
     total: any failure is swallowed, because a measurement must never fail a send.
     """
     try:
         if not isinstance(text, str) or not text.strip():
             return []
-        codes = codes_for(text, register=register)
+        codes = codes_for(text, register=register, inbound=inbound if isinstance(inbound, str) else "")
+        # Records whether technical detail was licensed, so a licensed-clean reply cannot be
+        # mistaken for a habit that actually improved.
+        licensed = inbound_asks_for_evidence(inbound)
         logger.info(
-            "[latency] " + VOICE_SHADOW_MARKER + " chat=%s register=%s codes=%s words=%d",
+            "[latency] " + VOICE_SHADOW_MARKER + " chat=%s register=%s asked=%s codes=%s words=%d",
             redacted_token(chat_id, prefix=CHAT_DIGEST_PREFIX), register,
-            ",".join(codes) or "clean", len(text.split()),
+            "yes" if licensed else "no", ",".join(codes) or "clean", len(text.split()),
             extra={"voice_shadow": {"register": register, "codes": list(codes),
-                                    "words": len(text.split())}},
+                                    "words": len(text.split()), "licensed": licensed}},
         )
         return codes
     except Exception:  # pragma: no cover - a scorer must not break a turn

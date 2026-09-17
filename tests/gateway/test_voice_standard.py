@@ -135,6 +135,48 @@ def test_structure_or_a_meta_opener_before_the_answer_is_still_buried():
         assert "buried_answer" not in codes_for(clean, register="chat"), clean
 
 
+def test_a_short_direct_answer_stays_clean():
+    """The third case: a small answer with no internals is clean, and stays clean."""
+    for inbound in ("hi", "check", ""):
+        assert codes_for("Yes, it is done.", register="chat", inbound=inbound) == []
+
+
+def test_check_licenses_a_detailed_evidence_report():
+    """Case 1: he asked, so technical detail is not an unneeded internal."""
+    report = ("Gateway is on `cab983382`, PID 557258, and the log is at "
+              "/workspace/hermes/logs/gateway.log.")
+    assert "unneeded_internal_detail" not in codes_for(report, register="chat", inbound="check")
+    assert "unneeded_internal_detail" not in codes_for(report, register="chat", inbound="status?")
+    assert "unneeded_internal_detail" not in codes_for(
+        report, register="chat", inbound="show me the receipts")
+
+
+def test_an_unprompted_status_dump_still_trips():
+    """Case 2: the same report with nothing asked is exactly the violation."""
+    report = ("Gateway is on `cab983382`, PID 557258, and the log is at "
+              "/workspace/hermes/logs/gateway.log.")
+    for inbound in ("", "hi", "thanks"):
+        assert "unneeded_internal_detail" in codes_for(report, register="chat",
+                                                       inbound=inbound), inbound
+
+
+def test_a_reply_cannot_license_itself_by_using_the_word_check():
+    """Licensing comes from his message only, or a reply could excuse its own dump."""
+    reply = ("The log is at /workspace/hermes/logs/gateway.log, PID 557258. "
+             "Check it yourself if you want.")
+    assert "unneeded_internal_detail" in codes_for(reply, register="chat", inbound="hi")
+
+
+def test_shadow_scoring_licenses_when_the_inbound_asked():
+    """The wiring that matters: the shadow line carries his message into the scorer."""
+    from gateway.naturalness_voice import log_voice_shadow
+
+    report = "Gateway is on `cab983382`, PID 557258."
+    assert log_voice_shadow(report, register="chat", chat_id="1", inbound="check") == []
+    assert log_voice_shadow(report, register="chat", chat_id="1", inbound="hi") == [
+        "unneeded_internal_detail"]
+
+
 def test_audit_returns_findings_in_a_stable_order():
     """Callers group by code; ordering must not depend on regex evaluation order."""
     findings = audit_voice("Verified — Acknowledged.", register="social")
