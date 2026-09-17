@@ -177,6 +177,31 @@ def test_shadow_scoring_licenses_when_the_inbound_asked():
         "unneeded_internal_detail"]
 
 
+def test_status_progress_and_next_step_phrasing_licenses_internals():
+    """He asks where things stand in ordinary words, not just the noun "status"."""
+    report = "Gateway is on `cab983382`, PID 557258."
+    for inbound in ("what is still open on LAB-3?",
+                    "what's left",
+                    "where are we",
+                    "give me the next step",
+                    "how's it going"):
+        assert "unneeded_internal_detail" not in codes_for(report, register="chat",
+                                                           inbound=inbound), inbound
+
+
+def test_a_label_he_named_is_licensed_but_an_unnamed_one_is_not():
+    """A ticket or project label is licensed by the echo, which needs no list of his projects.
+
+    The inbounds here carry no status phrasing on purpose, so only the echo can license.
+    """
+    reply = "LAB-3 is the only one still open."
+    assert "unneeded_internal_detail" not in codes_for(reply, register="chat",
+                                                       inbound="LAB-3 feels off")
+    assert "unneeded_internal_detail" in codes_for(reply, register="chat", inbound="hi")
+    assert "unneeded_internal_detail" in codes_for("LAB-47 is the follow-up.", register="chat",
+                                                   inbound="LAB-3 feels off")
+
+
 def test_audit_returns_findings_in_a_stable_order():
     """Callers group by code; ordering must not depend on regex evaluation order."""
     findings = audit_voice("Verified — Acknowledged.", register="social")

@@ -132,12 +132,18 @@ _LIVE_EVIDENCE = re.compile(
     re.I,
 )
 
-# The one condition that licenses technical detail in a 1:1 reply: he asked for it. Matched on
-# HIS message only, never on the reply, so a reply cannot license itself by using the words.
+# The conditions that license technical detail in a 1:1 reply: he asked for it, or he asked
+# where things stand. Matched on HIS message only, never on the reply, so a reply cannot
+# license itself by using the words.
 _EVIDENCE_REQUEST = re.compile(
     r"\b(?:check|status|receipts?|evidence|prove|proven|verify|verification|confirm|"
     r"reports?|logs?|details?|explain|summar(?:y|ise|ize)|update me|show me|"
-    r"walk me through|how do you know|what changed|did it work|numbers|breakdown)\b",
+    r"walk me through|how do you know|what changed|did it work|numbers|breakdown)\b"
+    # Plain status, progress and next-step phrasing counts as asking, not just the noun
+    # "status". "what's still open on LAB-3" is a status request in ordinary words.
+    r"|what(?:'s|s| is)?\s+(?:still\s+)?(?:open|left|remaining|outstanding|next)\b"
+    r"|\bwhere\s+are\s+we\b|\bhow(?:'s|s| is)?\s+(?:it|things)\s+going\b"
+    r"|\bprogress\b|\bnext\s+steps?\b|\bremaining\b|\bopen\s+items?\b|\bto-?do\b",
     re.I,
 )
 
@@ -162,8 +168,18 @@ def _structure_hits(text: str) -> list[str]:
     return [name for name, pattern in _STRUCTURE if pattern.search(text)]
 
 
-def _internal_hits(text: str) -> list[str]:
-    return [name for name, pattern in _INTERNAL if pattern.search(text)]
+def _internal_hits(text: str) -> list[tuple[str, str]]:
+    """(kind, matched token) per internal, so one he named himself can be spared.
+
+    The token matters, not just the kind: a ticket or project label is licensed when HIS
+    message used it, which is a rule that needs no list of his project names.
+    """
+    hits: list[tuple[str, str]] = []
+    for name, pattern in _INTERNAL:
+        match = pattern.search(text)
+        if match:
+            hits.append((name, match.group(0).strip("`").strip()))
+    return hits
 
 
 def inbound_asks_for_evidence(inbound: Any) -> bool:
@@ -240,9 +256,15 @@ def audit_voice(
 
     internals = _internal_hits(stripped)
     if internals and not asks_for_evidence and register in _SOCIAL_REGISTERS:
+        # He named it himself: a ticket or project label his own message used is not an
+        # unneeded internal. This needs no list of his project names, only the echo.
+        named = (inbound or "").lower()
+        internals = [(kind, token) for kind, token in internals
+                     if token and token.lower() not in named]
         # Next-action commands are licensed; inventory detail is not.
-        if not _is_next_action(stripped):
-            findings.append(Finding("unneeded_internal_detail", ", ".join(internals)))
+        if internals and not _is_next_action(stripped):
+            findings.append(Finding("unneeded_internal_detail",
+                                    ", ".join(kind for kind, _ in internals)))
 
     claim = _VERIFIED_CLAIM.search(stripped)
     if claim and not _LIVE_EVIDENCE.search(stripped):
