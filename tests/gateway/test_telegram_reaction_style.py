@@ -150,6 +150,20 @@ _TONE_CASES = [
     ("oke siap", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
     ("kasihan", style.TONE_SYMPATHY, "😭", style.JOB_TONE),
     ("gagal terus", style.TONE_TROUBLE, THUMBS_UP, style.JOB_RECEIPT),
+    # Stretched spellings are how excitement actually arrives ("yeayyy"); a tone pattern that
+    # only matches the dictionary spelling reads a real celebration as routine prose.
+    ("yeayyy", style.TONE_CELEBRATION, "🎉", style.JOB_TONE),
+    ("yeay", style.TONE_CELEBRATION, "🎉", style.JOB_TONE),
+    ("yesss", style.TONE_CELEBRATION, "🎉", style.JOB_TONE),
+    ("asyik", style.TONE_CELEBRATION, "🎉", style.JOB_TONE),
+    ("akhirnya", style.TONE_CELEBRATION, "🎉", style.JOB_TONE),
+    ("mantaaap", style.TONE_PRAISE, "👏", style.JOB_TONE),
+    ("cintaaa", style.TONE_AFFECTION, "❤", style.JOB_TONE),
+    ("kangeeeen", style.TONE_AFFECTION, "❤", style.JOB_TONE),
+    ("makasi", style.TONE_GRATITUDE, "🙏", style.JOB_TONE),
+    ("thanksss", style.TONE_GRATITUDE, "🙏", style.JOB_TONE),
+    ("wkwkwkwk", style.TONE_AMUSEMENT, "🤣", style.JOB_TONE),
+    ("pagiii", style.TONE_GREETING, "🤗", style.JOB_TONE),
 ]
 
 
@@ -265,6 +279,14 @@ _SOCIAL_CORPUS = [
     ("halo", style.TONE_GREETING, "🤗"),
     ("oke siap", style.TONE_ACKNOWLEDGEMENT, "👌"),
     ("kasihan", style.TONE_SYMPATHY, "😭"),
+    # Stretched excitement, the shape it actually arrives in.
+    ("yeayyy", style.TONE_CELEBRATION, "🎉"),
+    ("asyik", style.TONE_CELEBRATION, "🎉"),
+    ("mantaaap", style.TONE_PRAISE, "👏"),
+    ("cintaaa", style.TONE_AFFECTION, "❤"),
+    ("thanksss", style.TONE_GRATITUDE, "🙏"),
+    ("wkwkwkwk", style.TONE_AMUSEMENT, "🤣"),
+    ("pagiii", style.TONE_GREETING, "🤗"),
 ]
 
 # Indonesian work/ask messages. Recognising Indonesian *social* tone created this obligation: a

@@ -147,8 +147,8 @@ _TONE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     (TONE_TROUBLE, re.compile(
         r"\b(?:error|errors|bug|bugs|broken|broke|crash(?:es|ed|ing)?|fail(?:s|ed|ing|ures?)?|"
         r"exception|traceback|stack ?trace|regression|outage|downtime|degraded|"
-        r"rusak|gagal|lemot|nge ?hang|gak (?:jalan|bisa)|ga (?:jalan|bisa)|nggak (?:jalan|bisa)|"
-        r"tidak (?:jalan|bisa)|"
+        r"rusa+k+|gaga+l+|lemo+t+|nge ?hang|gak (?:jalan|bisa)|ga (?:jalan|bisa)|"
+        r"nggak (?:jalan|bisa)|tidak (?:jalan|bisa)|"
         r"not working|does ?n'?t work|does not work|wo ?n'?t work|is ?n'?t working|"
         # A bare number is ambiguous ("it costs 500"); a status code reads as trouble only
         # with an HTTP-ish verb in front of it, or a status phrase right after it.
@@ -163,17 +163,19 @@ _TONE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         re.IGNORECASE)),
     (TONE_QUESTION, _QUESTION_ASK),
     (TONE_GRATITUDE, re.compile(
-        r"\b(?:thanks|thank you|thx|tysm|ty|appreciate[ds]?|grateful|cheers|"
-        r"makasih|terima ?kasih|trims|tengkyu)\b|🙏",
+        r"\b(?:thanks+|thank you|thankyou|thx|tysm|ty|appreciate[ds]?|grateful|cheers|"
+        r"maka+si+h?|terima ?kasih|trims|tengkyu|alhamdulillah)\b|🙏",
         re.IGNORECASE)),
     (TONE_PRAISE, re.compile(
         r"\b(?:nice work|good job|great job|well done|nailed it|impressive|amazing|awesome|"
-        r"brilliant|perfect|legend|beautiful work|keren|mantap|mantul|hebat|bagus)\b|👏|🏆",
+        r"brilliant|perfect|legend|beautiful work|kere+n+|manta+p+|mantul+|heba+t+|bagu+s+)\b"
+        r"|👏|🏆",
         re.IGNORECASE)),
     (TONE_CELEBRATION, re.compile(
         r"\b(?:congrats|congratulations|congratulate|celebrate|celebration|birthday|milestone|"
         # "selamat pagi" is a greeting, not a celebration — the lookahead keeps them apart.
-        r"yay|hooray|woo ?hoo|we did it|it works|hore|selamat(?!\s+(?:pagi|siang|sore|malam)))\b"
+        r"yay+|yea+y+|yey+|yess+|hooray|woo ?hoo|we did it|it works|hore+|asyik|akhirnya|"
+        r"selamat(?!\s+(?:pagi|siang|sore|malam)))\b"
         r"|🎉|🎂|🥳",
         re.IGNORECASE)),
     (TONE_AFFECTION, re.compile(
@@ -181,25 +183,25 @@ _TONE_PATTERNS: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
         # "what a pity", where the glyph is merely a different social one — the guard's verdict
         # is identical either way, so the ambiguity costs nothing that matters.
         r"\b(?:i love (?:you|it|this)|love you|miss you|adore (?:you|this)|proud of you|"
-        r"xoxo|hugs?|saya+ng(?:ku)?|cinta(?:ku)?|kangen|peluk)\b|❤|🥰|😍|💋",
+        r"xoxo|hugs?|saya+ng(?:ku)?|cinta+(?:ku)?|kange+n+|pelu+k+)\b|❤|🥰|😍|💋",
         re.IGNORECASE)),
     (TONE_AMUSEMENT, re.compile(
         r"\b(?:lol|lmao|lmfao|rofl|haha+|hehe+|hilarious|so funny|that's funny|cracked me up|"
-        r"wkwk+|ngakak|lucu|ketawa)\b"
+        r"wkwk(?:wk)*|wkwk+|ngakak+|lucu+|ketawa+)\b"
         r"|😂|🤣",
         re.IGNORECASE)),
     (TONE_SYMPATHY, re.compile(
         r"\b(?:so sorry|sorry to hear|that's rough|that sucks|condolences|rest in peace|rip|"
-        r"feel better|thinking of you|aww+|turut berduka|sabar ya|kasihan)\b|😭|💔",
+        r"feel better|thinking of you|aww+|turut berduka|sabar ya|kasiha+n+)\b|😭|💔",
         re.IGNORECASE)),
     (TONE_GREETING, re.compile(
         r"\b(?:hi|hello|hey|hey there|howdy|greetings|good morning|good afternoon|"
-        r"good evening|good night|goodnight|halo|hai|hei|pagi)\b|"
+        r"good evening|good night|goodnight|halo+|hai+|hei+|pagi+)\b|"
         r"selamat (?:pagi|siang|sore|malam)",
         re.IGNORECASE)),
     (TONE_ACKNOWLEDGEMENT, re.compile(
         r"\b(?:ok|okay|k|sure|got it|noted|understood|sounds good|works for me|cool|yep|yup|"
-        r"alright|fine by me|oke|siap|sip|baik)\b|👌|👍",
+        r"alright|fine by me|oke+|sia+p+|sip+|bai+k+)\b|👌|👍",
         re.IGNORECASE)),
 )
 
