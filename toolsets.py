@@ -141,6 +141,14 @@ TOOLSETS = {
          "annotate_preview", "read_window_below", "focus_pane", "react_to_message",
          "gui_tour", "show_tip"],
     ),
+    # One emoji reaction on the user's message. Folded in per SESSION by the resolver that can
+    # answer for the surface: the GUI gateway for desktop sessions (which also keep naming the tool
+    # in ``desktop_ui`` above — a GUI session is a reaction surface too), the gateway runner for a
+    # chat platform whose live adapter implements the reaction API. The tool
+    # (tools/react_to_message_tool.py) registers itself into this toolset, so the registry owns its
+    # membership — never a process env var, which is blind to who is on the other end.
+    "message_reactions": _ts(
+        "A single emoji reaction on the user's message (chat platforms with reaction support)"),
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
