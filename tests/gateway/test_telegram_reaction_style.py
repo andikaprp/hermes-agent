@@ -169,6 +169,8 @@ _TONE_CASES = [
     ("okieee", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
     ("okie", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
     ("okey", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
+    ("okayy", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
+    ("okk", style.TONE_ACKNOWLEDGEMENT, "👌", style.JOB_TONE),
 ]
 
 
