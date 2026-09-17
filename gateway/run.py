@@ -620,6 +620,8 @@ _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     + ")",
     re.IGNORECASE)
 
+from gateway.delivery_voice import final_delivery_voice_check as _final_delivery_voice_check
+
 
 def _looks_like_gateway_provider_error(text: str) -> bool:
     """True when text is a provider failure envelope, not normal content.
@@ -657,8 +659,8 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
-        return _gateway_provider_error_reply(redacted)
-    return redacted
+        return _final_delivery_voice_check(_gateway_provider_error_reply(redacted))
+    return _final_delivery_voice_check(redacted)
 
 
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
