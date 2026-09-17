@@ -1,5 +1,6 @@
 """Tests for Telegram message reactions tied to processing lifecycle hooks."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -178,3 +179,183 @@ def test_config_bridges_telegram_reactions(monkeypatch, tmp_path):
 
     import os
     assert os.getenv("TELEGRAM_REACTIONS") == "true"
+
+
+# ── _reaction_style resolution ───────────────────────────────────────
+
+
+def test_style_defaults_to_receipt_when_key_absent(monkeypatch):
+    """No ``reaction_style`` anywhere = the pre-existing 👀/👍 receipts (back-compat)."""
+    monkeypatch.delenv("TELEGRAM_REACTION_STYLE", raising=False)
+    adapter = _make_adapter()
+    assert adapter._reaction_style() == "receipt"
+
+
+def test_style_reads_yaml_extra(monkeypatch):
+    """``extra.reaction_style`` from config.yaml (per profile) is the YAML rung."""
+    monkeypatch.delenv("TELEGRAM_REACTION_STYLE", raising=False)
+    adapter = _make_adapter()
+    adapter.config.extra["reaction_style"] = "content"
+    assert adapter._reaction_style() == "content"
+
+
+def test_style_env_wins_over_yaml(monkeypatch):
+    """An explicit TELEGRAM_REACTION_STYLE beats the YAML value, like TELEGRAM_REACTIONS does."""
+    monkeypatch.setenv("TELEGRAM_REACTION_STYLE", "content")
+    adapter = _make_adapter()
+    adapter.config.extra["reaction_style"] = "receipt"
+    assert adapter._reaction_style() == "content"
+
+
+def test_style_unknown_value_warns_once_and_falls_back_to_receipt(monkeypatch, caplog):
+    """A typo'd style must not crash a turn: one warning per adapter, then ``receipt``."""
+    from plugins.platforms.telegram import adapter as telegram_adapter
+
+    monkeypatch.delenv("TELEGRAM_REACTION_STYLE", raising=False)
+    adapter = _make_adapter()
+    adapter.config.extra["reaction_style"] = "reciept"
+
+    with caplog.at_level(logging.WARNING, logger=telegram_adapter.logger.name):
+        assert [adapter._reaction_style() for _ in range(3)] == ["receipt"] * 3
+
+    warnings = [r for r in caplog.records if "unknown reaction_style" in r.message]
+    assert len(warnings) == 1
+
+
+def test_reactions_false_master_switch_wins_over_style(monkeypatch):
+    """``reactions: false`` stays authoritative — no style value re-enables the receipts."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "false")
+    monkeypatch.setenv("TELEGRAM_REACTION_STYLE", "receipt")
+    adapter = _make_adapter()
+    adapter.config.extra["reaction_style"] = "receipt"
+
+    assert adapter._reactions_enabled() is False
+    assert adapter._lifecycle_reactions_enabled() is False
+
+
+# ── lifecycle reactions per style ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome,final",
+    [(ProcessingOutcome.SUCCESS, "\U0001f44d"), (ProcessingOutcome.FAILURE, "\U0001f44e"),
+     (ProcessingOutcome.CANCELLED, None)],
+)
+async def test_receipt_style_keeps_lifecycle_reactions(monkeypatch, outcome, final):
+    """Style ``receipt`` = exactly today's behaviour: 👀 on start, then 👍/👎 (None = cleared)."""
+    monkeypatch.delenv("TELEGRAM_REACTION_STYLE", raising=False)
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    adapter = _make_adapter()
+    event = _make_event()
+
+    await adapter.on_processing_start(event)
+    await adapter.on_processing_complete(event, outcome)
+
+    assert [c.kwargs["reaction"] for c in adapter._bot.set_message_reaction.await_args_list] == ["\U0001f440", final]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", list(ProcessingOutcome))
+async def test_content_style_posts_no_lifecycle_reactions(monkeypatch, outcome):
+    """Style ``content``: zero automatic calls, whatever the outcome — the agent reacts only if it
+    decides to (``send_message action="react"``)."""
+    monkeypatch.delenv("TELEGRAM_REACTION_STYLE", raising=False)
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    adapter = _make_adapter()
+    adapter.config.extra["reaction_style"] = "content"
+    event = _make_event()
+
+    await adapter.on_processing_start(event)
+    await adapter.on_processing_complete(event, outcome)
+
+    adapter._bot.set_message_reaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_off_style_posts_no_lifecycle_reactions(monkeypatch):
+    """Style ``off`` (via env) behaves like reactions disabled."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
+    monkeypatch.setenv("TELEGRAM_REACTION_STYLE", "off")
+    adapter = _make_adapter()
+    event = _make_event()
+
+    await adapter.on_processing_start(event)
+    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+
+    adapter._bot.set_message_reaction.assert_not_awaited()
+
+
+# ── agent-facing add_reaction / remove_reaction ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_add_reaction_wraps_set_reaction():
+    """``send_message action="react"`` reaches the Bot API through the existing setter."""
+    adapter = _make_adapter()
+
+    assert await adapter.add_reaction("123", "\U0001f44d", message_id="456") is True
+    adapter._bot.set_message_reaction.assert_awaited_once_with(chat_id=123, message_id=456, reaction="\U0001f44d")
+
+
+@pytest.mark.asyncio
+async def test_remove_reaction_clears_via_set_reaction():
+    adapter = _make_adapter()
+
+    assert await adapter.remove_reaction("123", message_id="456") is True
+    adapter._bot.set_message_reaction.assert_awaited_once_with(chat_id=123, message_id=456, reaction=None)
+
+
+@pytest.mark.asyncio
+async def test_agent_reaction_without_message_id_fails_closed():
+    """Telegram keeps no per-chat "latest inbound": an omitted id fails rather than guessing."""
+    adapter = _make_adapter()
+
+    assert await adapter.add_reaction("123", "\U0001f44d") is False
+    assert await adapter.remove_reaction("123") is False
+    adapter._bot.set_message_reaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_reaction_is_not_gated_by_the_lifecycle_switches(monkeypatch):
+    """Deliberate reactions are not receipts: the master switch and the style leave them alone."""
+    monkeypatch.setenv("TELEGRAM_REACTIONS", "false")
+    adapter = _make_adapter()
+    adapter.config.extra["reaction_style"] = "content"
+
+    assert adapter._lifecycle_reactions_enabled() is False
+    assert await adapter.add_reaction("123", "\U0001f44d", message_id="456") is True
+
+
+# ── reaction_style in config.yaml ────────────────────────────────────
+
+
+def test_yaml_nested_extra_style_reaches_adapter(monkeypatch):
+    """The live config shape ``platforms.telegram.extra.{reactions,reaction_style}`` must reach
+    PlatformConfig.extra (the nested form is passed through by _apply_yaml_config, not bridged to env)."""
+    from plugins.platforms.telegram.adapter import _apply_yaml_config
+
+    monkeypatch.delenv("TELEGRAM_REACTIONS", raising=False)
+    monkeypatch.delenv("TELEGRAM_REACTION_STYLE", raising=False)
+
+    extras = _apply_yaml_config({}, {"extra": {"reactions": True, "reaction_style": "content"}})
+
+    adapter = _make_adapter()
+    adapter.config.extra.update(extras or {})
+    assert adapter._reactions_enabled() is True
+    assert adapter._lifecycle_reactions_enabled() is False
+
+
+def test_yaml_flat_reaction_style_bridges_env(monkeypatch):
+    """The documented flat form ``telegram.reaction_style`` also seeds extra and bridges the env var."""
+    import os
+    from plugins.platforms.telegram.adapter import _apply_yaml_config
+
+    # setenv (not delenv) so monkeypatch registers cleanup: _apply_yaml_config writes os.environ
+    # directly and would otherwise leak the bridged value into the rest of the session.
+    monkeypatch.setenv("TELEGRAM_REACTION_STYLE", "")
+
+    extras = _apply_yaml_config({}, {"reaction_style": "content"})
+
+    assert extras["reaction_style"] == "content"
+    assert os.getenv("TELEGRAM_REACTION_STYLE") == "content"

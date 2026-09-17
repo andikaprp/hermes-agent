@@ -1264,6 +1264,30 @@ Or via environment variable:
 TELEGRAM_REACTIONS=true
 ```
 
+### Reaction Style
+
+`reaction_style` decides which reactions the bot posts when they are enabled:
+
+| Style | Behaviour |
+|-------|-----------|
+| `receipt` (default) | Automated lifecycle receipts — 👀 while processing, then 👍 / 👎 (cleared if the turn is cancelled) |
+| `content` | No automatic reactions at all; the agent reacts only where it deliberately decides to, via `send_message` with `action="react"` (pass `message_id`) |
+| `off` | Same as leaving reactions disabled |
+
+```yaml
+telegram:
+  reactions: true
+  reaction_style: content
+```
+
+Set it next to `reactions` (the per-install extras map works too, e.g. `platforms.telegram.extra.reaction_style`), or through the environment variable, which wins over `config.yaml`:
+
+```bash
+TELEGRAM_REACTION_STYLE=content
+```
+
+`reactions: false` remains the master switch — no style value produces automatic reactions while it is off. A style the bot does not recognize is logged once and falls back to `receipt`, so a typo never breaks message processing.
+
 :::note
 Unlike Discord (where reactions are additive), Telegram's Bot API replaces all bot reactions in a single call. The transition from 👀 to 👍/👎 happens atomically — you won't see both at once.
 :::
