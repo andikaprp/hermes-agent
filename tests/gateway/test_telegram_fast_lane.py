@@ -367,9 +367,31 @@ def test_runner_updates_cached_agent_messages_on_lane_success(monkeypatch):
     assert agent._session_messages == lane_result["messages"]
 
 
-def test_try_fast_lane_carries_opencode_session_affinity():
-    """LAB-52: opencode-go lane must send x-opencode-session (else HTTP 400 MissingSessionID)."""
+def test_try_fast_lane_carries_opencode_session_affinity(monkeypatch):
+    """LAB-52: bind affinity via set_runtime_main; never pass main_runtime to call_llm.
+
+    Passing main_runtime into call_llm drops caller-pinned extra_headers in the aux
+    request builder (MissingSessionID 400). The main turn uses the contextvar path.
+    """
     captured: list[dict] = []
+    set_calls: list[dict] = []
+    reset_tokens: list = []
+
+    import agent.auxiliary_client as aux
+
+    real_set = aux.set_runtime_main
+    real_reset = aux.reset_runtime_main
+
+    def spy_set(*args, **kwargs):
+        set_calls.append({"args": args, "kwargs": dict(kwargs)})
+        return real_set(*args, **kwargs)
+
+    def spy_reset(token):
+        reset_tokens.append(token)
+        return real_reset(token)
+
+    monkeypatch.setattr(aux, "set_runtime_main", spy_set)
+    monkeypatch.setattr(aux, "reset_runtime_main", spy_reset)
 
     def fake_call_llm(**kwargs):
         captured.append(kwargs)
@@ -391,9 +413,60 @@ def test_try_fast_lane_carries_opencode_session_affinity():
     assert result is not None
     assert len(captured) == 1
     kw = captured[0]
-    assert (kw.get("main_runtime") or {}).get("session_id") == "sess-affinity-lab52"
+    assert "main_runtime" not in kw
+    assert set_calls, "set_runtime_main must be called"
+    assert set_calls[0]["args"][0] == "opencode-go"
+    assert set_calls[0]["args"][1] == "glm-5"
+    assert set_calls[0]["kwargs"].get("session_id") == "sess-affinity-lab52"
     headers = kw.get("extra_headers") or {}
     assert headers.get("x-opencode-session") == "sess-affinity-lab52"
+    assert len(reset_tokens) == 1
+
+
+def test_try_fast_lane_resets_runtime_main_when_call_llm_raises(monkeypatch, caplog):
+    """LAB-52: set_runtime_main token must reset in finally even on call setup failure."""
+    reset_tokens: list = []
+    set_calls: list[dict] = []
+
+    import agent.auxiliary_client as aux
+
+    real_set = aux.set_runtime_main
+    real_reset = aux.reset_runtime_main
+
+    def spy_set(*args, **kwargs):
+        set_calls.append({"kwargs": dict(kwargs)})
+        return real_set(*args, **kwargs)
+
+    def spy_reset(token):
+        reset_tokens.append(token)
+        return real_reset(token)
+
+    monkeypatch.setattr(aux, "set_runtime_main", spy_set)
+    monkeypatch.setattr(aux, "reset_runtime_main", spy_reset)
+
+    def boom(**kwargs):
+        raise RuntimeError("upstream down")
+
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        result = try_fast_lane(
+            history=[],
+            user_message="hi",
+            main_runtime={
+                "provider": "opencode-go",
+                "model": "glm-5",
+                "api_key": "k",
+                "base_url": "https://opencode.ai/zen/go/v1",
+                "api_mode": "chat_completions",
+                "session_id": "sess-affinity-lab52",
+            },
+            call_llm_fn=boom,
+            chat_id="42",
+        )
+    assert result is None
+    assert set_calls and set_calls[0]["kwargs"].get("session_id") == "sess-affinity-lab52"
+    assert len(reset_tokens) == 1
+    assert "fallback=true" in caplog.text
+    assert "fast_lane call setup failed: RuntimeError" in caplog.text
 
 
 def test_runner_passes_session_identity_into_fast_lane_runtime(monkeypatch):

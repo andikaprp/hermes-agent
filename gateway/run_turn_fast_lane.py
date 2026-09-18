@@ -372,13 +372,13 @@ def try_fast_lane(
 
     started = clock()
     provider_label = provider or runtime.get("provider") or "main"
-    # Lane-side affinity: aux `_normalize_main_runtime` drops session_id, and the
-    # gateway turn thread has no ambient conversation contextvar, so call_llm's
-    # shared merge would send no x-opencode-session. Attach it here; caller-pinned
-    # extra_headers win over the later aux setdefault merge.
+    # LAB-52: passing main_runtime into call_llm drops caller-pinned extra_headers
+    # inside the aux request builder. Bind affinity the same way the main turn does
+    # (set_runtime_main contextvar); keep lane-side extra_headers as a belt-and-
+    # suspenders pin (aux merge setdefaults the same value).
+    sid = (runtime.get("session_id") or "").strip()
     extra_headers: Optional[Dict[str, str]] = None
-    _sid = (runtime.get("session_id") or "").strip() if isinstance(runtime.get("session_id"), str) else ""
-    if _sid:
+    if sid:
         from agent.opencode_affinity import merge_opencode_session_headers
 
         _hdr_kwargs: Dict[str, Any] = {}
@@ -386,78 +386,94 @@ def try_fast_lane(
             _hdr_kwargs,
             provider or runtime.get("provider"),
             runtime.get("base_url"),
-            _sid,
+            sid,
         )
         got = _hdr_kwargs.get("extra_headers")
         if isinstance(got, dict) and got:
             extra_headers = got
-    try:
-        stream = call_llm_fn(
-            messages=messages,
-            stream=True,
-            max_tokens=256,
-            temperature=0.7,
-            timeout=call_timeout_s,
-            main_runtime=runtime or None,
-            provider=provider or None,
-            model=model or None,
-            api_key=runtime.get("api_key"),
-            base_url=runtime.get("base_url"),
-            api_mode=runtime.get("api_mode"),
-            extra_headers=extra_headers,
-        )
-    except Exception as exc:
-        logger.info("fast_lane call setup failed: %s", type(exc).__name__)
-        log_fast_lane(
-            provider=provider_label, ttft_ms=None,
-            ready_ms=(clock() - started) * 1000.0, fallback=True, chat_id=chat_id,
-        )
-        return None
 
-    # Non-stream shims may return a completed response despite stream=True.
-    if _is_completed_response(stream):
-        from agent.auxiliary_client import extract_content_or_reasoning
+    from agent.auxiliary_client import reset_runtime_main, set_runtime_main
+
+    token = None
+    try:
+        token = set_runtime_main(
+            provider,
+            model,
+            base_url=str(runtime.get("base_url") or ""),
+            api_key=runtime.get("api_key") or "",
+            api_mode=str(runtime.get("api_mode") or ""),
+            session_id=sid,
+        )
         try:
-            text = sanitize_fast_lane_reply(extract_content_or_reasoning(stream) or "")
-        except Exception:
-            text = ""
-        ready_ms = (clock() - started) * 1000.0
-        if not text:
+            stream = call_llm_fn(
+                messages=messages,
+                stream=True,
+                max_tokens=256,
+                temperature=0.7,
+                timeout=call_timeout_s,
+                provider=provider or None,
+                model=model or None,
+                api_key=runtime.get("api_key"),
+                base_url=runtime.get("base_url"),
+                api_mode=runtime.get("api_mode"),
+                extra_body=runtime.get("extra_body"),
+                extra_headers=extra_headers,
+            )
+        except Exception as exc:
+            logger.info("fast_lane call setup failed: %s", type(exc).__name__)
+            log_fast_lane(
+                provider=provider_label, ttft_ms=None,
+                ready_ms=(clock() - started) * 1000.0, fallback=True, chat_id=chat_id,
+            )
+            return None
+
+        # Non-stream shims may return a completed response despite stream=True.
+        if _is_completed_response(stream):
+            from agent.auxiliary_client import extract_content_or_reasoning
+            try:
+                text = sanitize_fast_lane_reply(extract_content_or_reasoning(stream) or "")
+            except Exception:
+                text = ""
+            ready_ms = (clock() - started) * 1000.0
+            if not text:
+                log_fast_lane(
+                    provider=provider_label, ttft_ms=ready_ms, ready_ms=ready_ms,
+                    fallback=True, chat_id=chat_id,
+                )
+                return None
+            if on_delta is not None:
+                on_delta(text)
             log_fast_lane(
                 provider=provider_label, ttft_ms=ready_ms, ready_ms=ready_ms,
+                fallback=False, chat_id=chat_id,
+            )
+            return _success_result(history, user_message, text)
+
+        text, ttft_ms, err = _consume_stream_with_ttft(
+            stream,
+            ttft_budget_ms=ttft_budget_ms,
+            on_delta=on_delta,
+            started_at=started,
+            clock=clock,
+        )
+        ready_ms = (clock() - started) * 1000.0
+        if err or not text:
+            log_fast_lane(
+                provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
                 fallback=True, chat_id=chat_id,
             )
             return None
-        if on_delta is not None:
-            on_delta(text)
+
+        text = sanitize_fast_lane_reply(text) or _strip_em_dashes(text).strip() or "…"
+
         log_fast_lane(
-            provider=provider_label, ttft_ms=ready_ms, ready_ms=ready_ms,
+            provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
             fallback=False, chat_id=chat_id,
         )
         return _success_result(history, user_message, text)
-
-    text, ttft_ms, err = _consume_stream_with_ttft(
-        stream,
-        ttft_budget_ms=ttft_budget_ms,
-        on_delta=on_delta,
-        started_at=started,
-        clock=clock,
-    )
-    ready_ms = (clock() - started) * 1000.0
-    if err or not text:
-        log_fast_lane(
-            provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
-            fallback=True, chat_id=chat_id,
-        )
-        return None
-
-    text = sanitize_fast_lane_reply(text) or _strip_em_dashes(text).strip() or "…"
-
-    log_fast_lane(
-        provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
-        fallback=False, chat_id=chat_id,
-    )
-    return _success_result(history, user_message, text)
+    finally:
+        if token is not None:
+            reset_runtime_main(token)
 
 
 def _success_result(
