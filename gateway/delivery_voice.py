@@ -38,7 +38,7 @@ _AI_SHAPED_DELIVERY_PHRASES = (
     re.compile(r"\bwhat would you like to do next\??\s*", re.IGNORECASE),
     re.compile(r"\blet me know if you need anything else\.?\s*", re.IGNORECASE),
     re.compile(r"\bwhat'?s next\??\s*", re.IGNORECASE),
-    re.compile(r"\blet me know how (?:it|things) go(?:es)?\.?\s*", re.IGNORECASE),
+    re.compile(r"\blet me know how (?:it|things) go(?:es)?(?:[.!])?\s*", re.IGNORECASE),
     re.compile(r"\bfeel free to reach out\.?\s*", re.IGNORECASE),
     re.compile(r"\bany questions\??\s*", re.IGNORECASE),
 )
