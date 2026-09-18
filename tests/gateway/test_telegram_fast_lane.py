@@ -213,7 +213,10 @@ def test_try_fast_lane_falls_back_on_provider_error(caplog):
         )
     assert result is None
     assert "fallback=true" in caplog.text
-    assert "42" not in caplog.text
+    # chat_id must be redacted in the latency line (not raw); avoid matching
+    # incidental substrings like pytest line numbers in the log prefix.
+    assert "chat=42" not in caplog.text
+    assert "chat=" in caplog.text
 
 
 def test_try_fast_lane_falls_back_on_ttft_budget():
