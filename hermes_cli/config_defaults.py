@@ -2443,6 +2443,13 @@ DEFAULT_CONFIG = {
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
     },
+    # Native Gemini (AI Studio) auth: api_key (default, GOOGLE_API_KEY/GEMINI_API_KEY) or oauth
+    # (Google account consent → HermesTokenStorage slug gemini-api). No HERMES_* env for this switch.
+    "gemini": {
+        "auth": "api_key",  # "api_key" | "oauth"
+        # Optional GCP project id sent as x-goog-user-project on OAuth requests (recommended by Google).
+        "project_id": "",
+    },
     "_config_version": 45,  # Config schema version - bump this when adding new required fields
 }
 
