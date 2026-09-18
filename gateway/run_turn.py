@@ -2092,7 +2092,8 @@ class GatewayTurnMixin:
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
             }
-            await self.hooks.emit("agent:start", hook_ctx)
+            _hook_results = await self.hooks.emit_collect("agent:start", hook_ctx)
+            self._hmwa_apply_turn_hook_notes(session_key, _hook_results)
 
             # Capture the launch session id so post-run compression publication is identity-guarded
             # (a /new may move session_entry.session_id while the old run is still unwinding).

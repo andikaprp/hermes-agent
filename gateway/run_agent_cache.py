@@ -553,6 +553,22 @@ class GatewayAgentCacheMixin:
         staged, state.conversation.sidecar_notes = state.conversation.sidecar_notes, []
         return list(staged) if isinstance(staged, list) else []
 
+    def _hmwa_apply_turn_hook_notes(self, session_key: str, hook_results: Optional[List[Any]]) -> None:
+        """Attach non-empty string returns from ``agent:start`` hooks to this turn's
+        must-deliver sidecar notes (rides the user message; never the system prompt).
+
+        Fail-closed: only non-empty strings are attached; anything else is ignored and
+        an empty result list is a no-op.
+        """
+        if not session_key or not hook_results:
+            return
+        notes = [result.strip() for result in hook_results
+                 if isinstance(result, str) and result.strip()]
+        if not notes:
+            return
+        staged = self._consume_pending_turn_sidecar_notes(session_key)
+        self._set_pending_turn_sidecar_notes(session_key, list(staged) + notes)
+
     def _voice_channel_sidecar_note(self, event, source: SessionSource, session_key: str) -> Optional[str]:
         """``[Voice channel now: ...]`` note when VC state changed; ``None`` when unchanged so per-turn
         member/speaking churn can't touch the prompt."""
