@@ -2033,6 +2033,8 @@ DEFAULT_CONFIG = {
                 "enabled": True,
                 "provider": "",
                 "model": "",
+                "base_url": "",
+                "api_key": "",
                 "max_messages": 6,
                 "max_chars": 2000,
                 "ttft_budget_ms": 8000,

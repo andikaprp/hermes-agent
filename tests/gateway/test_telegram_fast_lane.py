@@ -148,6 +148,8 @@ def test_default_config_declares_fast_lane_block():
     assert block["max_messages"] >= 1
     assert block["max_chars"] >= 1
     assert block["ttft_budget_ms"] >= 1
+    assert block["base_url"] == ""
+    assert block["api_key"] == ""
 
 
 # ── metrics line ──────────────────────────────────────────────────────────
@@ -490,3 +492,56 @@ def test_lane_affinity_via_contextvar_and_no_main_runtime(monkeypatch):
         pass
     assert seen.get("passed_main_runtime") is False
     assert seen.get("session_id") == "ses-1"
+
+
+def test_local_fast_lane_skips_opencode_affinity_contextvar():
+    """LAB-53: local / 127.0.0.1 OpenAI-compatible lane must NOT set the
+    runtime contextvar or emit x-opencode-session (zero affinity machinery).
+    OpenCode path keeps affinity; this only gates non-OpenCode targets.
+    """
+    from agent.auxiliary_client import _runtime_main_value
+    from agent.opencode_affinity import OPENCODE_SESSION_HEADER, opencode_session_headers
+
+    seen: dict = {}
+
+    def fake_call_llm(**kwargs):
+        seen["kwargs"] = dict(kwargs)
+        seen["session_id"] = _runtime_main_value("session_id")
+        seen["affinity_headers"] = opencode_session_headers(
+            kwargs.get("provider"), kwargs.get("base_url"), seen["session_id"] or None,
+        )
+        return iter([_chunk("sip")])
+
+    result = try_fast_lane(
+        history=[],
+        user_message="ya",
+        user_config={
+            "gateway": {"telegram": {"fast_lane": {
+                "enabled": True,
+                "provider": "local",
+                "model": "qwen-local",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "api_key": "sk-local",
+                "max_messages": 6,
+                "max_chars": 2000,
+                "ttft_budget_ms": 8000,
+            }}}
+        },
+        main_runtime={
+            "provider": "opencode-go",
+            "model": "glm-5",
+            "api_key": "k",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_mode": "chat_completions",
+            "session_id": "sess-should-not-leak",
+        },
+        call_llm_fn=fake_call_llm,
+    )
+    assert result is not None
+    assert result["final_response"] == "sip"
+    assert seen["kwargs"].get("provider") == "local"
+    assert seen["kwargs"].get("base_url") == "http://127.0.0.1:8080/v1"
+    assert seen["kwargs"].get("api_key") == "sk-local"
+    assert seen["session_id"] in (None, "")
+    assert OPENCODE_SESSION_HEADER not in (seen["affinity_headers"] or {})
+    assert "main_runtime" not in seen["kwargs"]
