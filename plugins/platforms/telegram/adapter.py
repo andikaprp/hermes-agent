@@ -6638,6 +6638,34 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         return str(configured).lower() not in {"false", "0", "no"}
 
+    #: Lifecycle styles: ``receipt`` posts 👀 then 👍/👎 (the behaviour every install had before this
+    #: key existed), ``content`` posts none of our own — the agent reacts deliberately through
+    #: ``send_message action="react"`` — and ``off`` is the same as ``reactions: false``.
+    _RECEIPT_STYLE, _CONTENT_STYLE, _OFF_STYLE = "receipt", "content", "off"
+
+    def _reaction_style(self) -> str:
+        """Lifecycle style: scoped ``TELEGRAM_REACTION_STYLE`` → ``extra.reaction_style`` (YAML, per
+        profile) → ``receipt``.
+
+        ``receipt`` is the fallback so a config that never set the key keeps reacting exactly as
+        before. An unknown value must never crash a turn (it is read on every message): warn once per
+        adapter, then behave like ``receipt`` — the documented default — rather than silently
+        choosing a mode the operator did not write.
+        """
+        configured = _extra_or_secret(self.config.extra, "reaction_style", "TELEGRAM_REACTION_STYLE", None)
+        style = str(configured).strip().lower() if configured is not None else ""
+        if style in {self._RECEIPT_STYLE, self._CONTENT_STYLE, self._OFF_STYLE}:
+            return style
+        if style and not getattr(self, "_reaction_style_warned", False):
+            self._reaction_style_warned = True
+            logger.warning("[%s] unknown reaction_style %r; using %r", self.name, configured, self._RECEIPT_STYLE)
+        return self._RECEIPT_STYLE
+
+    def _lifecycle_reactions_enabled(self) -> bool:
+        """Automatic 👀/👍/👎 receipts: only under the ``receipt`` style, and ``reactions: false`` wins
+        over any style (the master switch stays authoritative)."""
+        return self._reactions_enabled() and self._reaction_style() == self._RECEIPT_STYLE
+
     async def _set_reaction(self, chat_id: str, message_id: str, emoji: Optional[str]) -> bool:
         """Set a single emoji reaction (``None`` clears all bot-set reactions, the documented Bot API way)."""
         if not self._bot:
@@ -6656,9 +6684,27 @@ class TelegramAdapter(BasePlatformAdapter):
         """Clear all bot-set reactions."""
         return await self._set_reaction(chat_id, message_id, None)
 
+    # -- Agent-facing reactions (send_message action="react"): deliberate intents, so NOT gated by the
+    # reactions master switch or the lifecycle style (same split as Photon's tapbacks).
+
+    async def add_reaction(self, chat_id: str, emoji: str, message_id: Optional[str] = None) -> bool:
+        """React to ``message_id`` with ``emoji``. Telegram keeps no per-chat "latest inbound" record,
+        so an omitted ``message_id`` fails instead of guessing the wrong message to react to."""
+        if not message_id:
+            logger.debug("[%s] add_reaction skipped: message_id required", self.name)
+            return False
+        return await self._set_reaction(chat_id, message_id, emoji)
+
+    async def remove_reaction(self, chat_id: str, message_id: Optional[str] = None) -> bool:
+        """Clear the bot's reactions on ``message_id`` (same wrapper contract as ``add_reaction``)."""
+        if not message_id:
+            logger.debug("[%s] remove_reaction skipped: message_id required", self.name)
+            return False
+        return await self._clear_reactions(chat_id, message_id)
+
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add an in-progress reaction when message processing begins."""
-        if not self._reactions_enabled():
+        if not self._lifecycle_reactions_enabled():
             return
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
@@ -6668,7 +6714,7 @@ class TelegramAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Swap the in-progress reaction for a final success/failure reaction (set_message_reaction
         replaces, not adds); CANCELLED explicitly clears the 👀."""
-        if not self._reactions_enabled():
+        if not self._lifecycle_reactions_enabled():
             return
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
@@ -6799,6 +6845,7 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
         ("ignored_threads", "TELEGRAM_IGNORED_THREADS", True)):
         _bridge_gate(key, env, telegram_cfg.get(key), seed_extra=seed)
     _bridge_lower("reactions", "TELEGRAM_REACTIONS")
+    _bridge_lower("reaction_style", "TELEGRAM_REACTION_STYLE")
     if "proxy_url" in telegram_cfg:
         # Seeded into extra so ``_build_ptb_requests`` keeps a secondary's route without the env bridge.
         extras.setdefault("proxy_url", str(telegram_cfg["proxy_url"]).strip())

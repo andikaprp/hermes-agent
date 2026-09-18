@@ -58,6 +58,15 @@ _UNEXPECTED_SILENCE_REPLY = (
 )
 
 
+def _surface_toolsets_for_source(adapter) -> set:
+    """Toolsets that exist because of the SESSION's surface (root AGENTS.md): a chat adapter that
+    implements the reaction API earns the reaction toolset, and only the sessions it serves. The
+    probe is the tool's own (``adapter_supports_reactions``), so the schema a session gets promises
+    exactly what a call from that session can deliver."""
+    from tools.react_to_message_tool import MESSAGING_REACTIONS_TOOLSET, adapter_supports_reactions
+    return {MESSAGING_REACTIONS_TOOLSET} if adapter_supports_reactions(adapter) else set()
+
+
 def _bg_prompt_preview(prompt: str, limit: int = 60) -> str:
     """Short single-line quote of a /bg prompt for its failure notice (the task id means nothing to the user)."""
     text = " ".join(str(prompt or "").split())
@@ -2233,8 +2242,11 @@ class GatewayTurnMixin:
     ) -> list:
         """Enabled toolsets for an agent run, honoring an adapter ``toolsets_for_source()`` override
         validated through the SAME ``_get_platform_tools`` path (unknown / platform-restricted
-        toolsets dropped, not trusted)."""
+        toolsets dropped, not trusted), plus the session's own surface
+        (``_surface_toolsets_for_source``): a client capability only this turn's adapter can answer
+        never travels in the shared platform config."""
         from hermes_cli.tools_config import _get_platform_tools
+        adapter = None
         try:
             adapter = self._adapter_for_source(source)
             override = adapter.toolsets_for_source(source) if adapter is not None else None
@@ -2244,7 +2256,8 @@ class GatewayTurnMixin:
             pts = dict(user_config.get("platform_toolsets") or {})
             pts[platform_key] = [str(x) for x in override]
             user_config = {**user_config, "platform_toolsets": pts}
-        return sorted(_get_platform_tools(user_config, platform_key))
+        enabled = _get_platform_tools(user_config, platform_key) | _surface_toolsets_for_source(adapter)
+        return sorted(enabled)
 
     def _resolve_turn_toolsets(self, user_config: dict, source: "SessionSource", platform_key: str):
         """``(enabled_toolsets, disabled_toolsets)`` for an agent run on ``source``."""
