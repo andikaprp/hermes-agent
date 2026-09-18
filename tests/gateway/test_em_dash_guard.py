@@ -145,3 +145,25 @@ def test_em_dash_filter_keeps_code_untouched_when_prose_also_has_a_dash():
     assert final_delivery_voice_check(raw) == (
         "Run this, it is safe:\n\n```sh\ndocker ps \u2014 format '{{.Names}}'\n```"
     )
+
+
+FILLER_CLOSERS = (
+    "Got it, what's next?",
+    "Got it. what's next?",
+    "Let me know if you need anything else.",
+    "Let me know how it goes!",
+    "Let me know how things go.",
+    "Feel free to reach out.",
+    "Any questions?",
+)
+
+
+@pytest.mark.parametrize("raw", FILLER_CLOSERS)
+def test_filler_closers_are_stripped_at_the_final_seam(raw: str):
+    assert final_delivery_voice_check(raw) == ""
+
+
+def test_filler_closer_strip_keeps_real_content_and_recapitalizes():
+    raw = "it's landed, sayangkuu. any questions?"
+
+    assert final_delivery_voice_check(raw) == "It's landed, sayangkuu."
