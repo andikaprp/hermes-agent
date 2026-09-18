@@ -84,7 +84,26 @@ class HookRegistry:
         return list(self._loaded_hooks)
 
     def _register_builtin_hooks(self) -> None:
-        """Extension point for always-on built-in hooks; currently none shipped."""
+        """Always-on built-in hooks: the Linear Labs in-progress turn note (``agent:start``).
+
+        Registration is additive and never raises: a builtin that cannot load prints a
+        skip notice and the gateway proceeds (the hook itself already fails closed to no
+        note on every failure path).
+        """
+        try:
+            from gateway.builtin_hooks.linear_in_progress import handle as _linear_handle
+        except Exception as e:  # pragma: no cover - trivial import guard
+            _skip("linear-in-progress", f"builtin import failed: {e}")
+            return
+        if any(handler is _linear_handle for handler in self._handlers.get("agent:start", [])):
+            return
+        self._handlers.setdefault("agent:start", []).append(_linear_handle)
+        self._loaded_hooks.append({
+            "name": "linear-in-progress",
+            "description": "Surface Labs in-progress Linear issues (LAB-*) in turn context at agent:start",
+            "events": ["agent:start"],
+            "path": "builtin:gateway/builtin_hooks/linear_in_progress.py",
+        })
 
     def discover_and_load(self) -> None:
         """Register built-in hooks, then load every valid hook dir under the active profile's ``hooks/``."""
