@@ -218,6 +218,33 @@ async def test_debounce_resets_timer_on_new_arrival():
     await asyncio.sleep(0.2)
     assert session_key not in adapter._text_debounce
     assert adapter._pending_messages[session_key].text == "one\ntwo\nthree"
+    assert getattr(adapter._pending_messages[session_key], "_gateway_busy_text_debounced", False)
+
+
+@pytest.mark.asyncio
+async def test_telegram_queue_burst_is_one_pending_regeneration_and_sends_no_statuses():
+    """Several corrections during one live turn become one quiet-window replacement intent."""
+    adapter = _make_adapter()
+    adapter._busy_text_debounce_seconds = 0.05
+    adapter._busy_text_hard_cap_seconds = 1.0
+    source = _make_event("draft").source
+    session_key = build_session_key(source)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    # The runner's queue-mode callback deliberately returns False so base.py owns the
+    # debounce; no busy acknowledgement/status sender is involved in this path.
+    adapter._busy_session_handler = AsyncMock(return_value=False)
+    for text in ("first correction", "second correction", "final correction"):
+        await adapter.handle_message(_make_event(text))
+        await asyncio.sleep(0.01)
+
+    await asyncio.sleep(0.08)
+    pending = adapter._pending_messages[session_key]
+    assert pending.text == "first correction\nsecond correction\nfinal correction"
+    assert getattr(pending, "_gateway_busy_text_debounced", False)
+    assert adapter._busy_session_handler.await_count == 3
+    # The adapter has no status send path; all three bubbles resulted in one pending turn.
+    assert adapter._message_handler.await_count == 0
 
 
 @pytest.mark.asyncio

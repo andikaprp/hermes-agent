@@ -19,6 +19,8 @@ from typing import Any
 LIVE_GATEWAY_SILENT_MARKERS = frozenset({
     "[SILENT]", "SILENT", "NO_REPLY", "NO REPLY",
     "[静默]", "静默", "[沉默]", "沉默",
+    # Provider/runtime cancellation diagnostics are control-plane noise, not replies.
+    "[RESPONSE INTERRUPTED]",
 })
 
 # Bracketed markers drive the autonomous lane's prefix rule ("[SILENT] nothing

@@ -30,6 +30,7 @@ from gateway.session import (
 )
 from gateway.session_transcript import TranscriptReadError
 from gateway.turn_context import TurnContext
+from gateway.turn_timing import current_turn_timing
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
@@ -1881,8 +1882,10 @@ class GatewayTurnMixin:
             # /loop and /goal hooks that read the return value.
             with suppress(Exception):
                 event._streamed_final_response = str(response or "")
+            (getattr(event, "_gateway_turn_timing", None) or current_turn_timing()).finish_delivery()
             return None
 
+        (getattr(event, "_gateway_turn_timing", None) or current_turn_timing()).finish_delivery()
         return response
 
     # Chat-side next steps keyed by HTTP status; Hermes commands only (/login is the gateway's own
@@ -1905,6 +1908,7 @@ class GatewayTurnMixin:
             # Context overflow / payload too large: a deterministic rejection (#107567), and the same
             # no-grow rule as the persist path (#1630) — nothing is written into an oversized session.
             from gateway.run import _CONTEXT_OVERFLOW_REPLY
+            current_turn_timing().log_terminal()
             return _CONTEXT_OVERFLOW_REPLY
         # Replay can coalesce inputs; only this input's durable marker establishes ownership.
         try:
@@ -1939,6 +1943,7 @@ class GatewayTurnMixin:
                 status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
         elif status_code == 400:
             status_hint = " The AI model service rejected the request."
+        current_turn_timing().log_terminal()
         return self._hmwa_add_failed_turn_notice(
             f"⚠️ Something went wrong and I couldn't finish this reply.{status_hint}\n"
             "Use /retry to try again, or /new to start a fresh conversation. "
@@ -2590,10 +2595,11 @@ class GatewayTurnMixin:
         if _scfg is None:
             from gateway.config import StreamingConfig
             _scfg = StreamingConfig()
-        from gateway.display_config import resolve_display_setting
-        _plat_streaming = resolve_display_setting(_load_gateway_config(), _platform_config_key(source.platform), "streaming")
-        _streaming_enabled = (
-            _scfg.enabled and _scfg.transport != "off" if _plat_streaming is None else bool(_plat_streaming)
+        from gateway.display_config import resolve_session_streaming
+        _streaming_enabled = resolve_session_streaming(
+            _load_gateway_config(), _platform_config_key(source.platform),
+            getattr(source, "chat_type", None),
+            master_enabled=_scfg.enabled and _scfg.transport != "off", transport=_scfg.transport,
         )
         if not _streaming_enabled:
             return None
@@ -3218,6 +3224,19 @@ class GatewayTurnMixin:
                 if not _adapter:
                     continue
                 if hasattr(_adapter, 'has_pending_interrupt') and _adapter.has_pending_interrupt(session_key):
+                    _pending = getattr(_adapter, "_pending_messages", {}).get(session_key)
+                    # Queue-mode text is deliberately revealed only after its debounce quiet
+                    # window.  Permit that batch to replace the original draft once, then let
+                    # later bubbles accumulate for the terminal response.  Re-interrupting the
+                    # recursive follow-up on every correction is what exhausts active-turn
+                    # redirect restart limits and leaks stale drafts.
+                    if (
+                        source.platform == Platform.TELEGRAM
+                        and getattr(_adapter, "_busy_text_mode", "interrupt") == "queue"
+                        and getattr(_pending, "_gateway_busy_text_debounced", False)
+                        and turn_ctx._interrupt_depth > 0
+                    ):
+                        continue
                     agent = agent_holder[0]
                     if agent:
                         await self._run_agent_fire_pending_interrupt(
@@ -3641,6 +3660,17 @@ class GatewayTurnMixin:
         )
         logger.debug("Processing pending message: '%s...'", pending[:40])
 
+        # The conversation loop's cancellation result is an internal diagnostic.  It can
+        # still carry the legacy literal marker when a later Telegram correction arrives
+        # during generation; never let that diagnostic become the queued chain's final
+        # deliverable.  Keep transcript/result metadata intact and run the last-mile
+        # voice guard so markers, canned scaffolding, and em dashes cannot leak here.
+        from gateway.delivery_voice import final_delivery_voice_check
+        if result.get("interrupted") and isinstance(response, str):
+            response = final_delivery_voice_check(response)
+        if isinstance(result, dict) and result.get("interrupted") and isinstance(result.get("final_response"), str):
+            result = {**result, "final_response": final_delivery_voice_check(result["final_response"])}
+
         # Clear the interrupt event so the recursive _run_agent isn't re-interrupted (infinite loop).
         _active = getattr(adapter, "_active_sessions", None) if adapter else None
         if _active and session_key and session_key in _active:
@@ -3661,7 +3691,15 @@ class GatewayTurnMixin:
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
 
         # Interrupted: discard the response ("Operation interrupted." is noise).
-        if not result.get("interrupted"):
+        # A debounced Telegram queue batch is a replacement intent, not an independent
+        # request.  If another batch is waiting, keep this intermediate draft private and
+        # recurse once more; the terminal turn is the only user-visible response.
+        _replace_stale_draft = bool(
+            pending_event is not None
+            and getattr(pending_event, "_gateway_busy_text_debounced", False)
+            and getattr(getattr(pending_event, "source", None), "platform", None) == Platform.TELEGRAM
+        )
+        if not result.get("interrupted") and not _replace_stale_draft:
             await self._run_agent_deliver_first_response(turn_ctx, adapter, response, result, stream_task)
 
         updated_history = result.get("messages", history)
