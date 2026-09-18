@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from utils import normalize_proxy_url
 from agent.proxy_bypass import first_proxy_env_value, should_bypass_proxy as _should_bypass_proxy
+from gateway.delivery_voice import final_delivery_voice_check
 
 logger = logging.getLogger(__name__)
 
@@ -4005,6 +4006,7 @@ class BasePlatformAdapter(ABC):
         Returns the result with the adapter that sent it: that adapter owns ``result.message_id``
         (an ephemeral delete must go to the same transport)."""
         delivery_adapter = self._final_delivery_adapter(event.source)
+        text_content = final_delivery_voice_check(text_content)
         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
                     len(text_content), event.source.chat_id)
         obligation_id = await self._record_delivery_obligation(
