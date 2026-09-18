@@ -2023,8 +2023,20 @@ DEFAULT_CONFIG = {
         # ignored a hint", never dropped work). False = every DM turn enters the full agentic
         # loop. Default on. The gateway does not merge DEFAULT_CONFIG, so the reader treats a
         # missing key as enabled; set false here to disable without a code change.
+        # fast_lane (LAB-52): when enabled, eligible turns first try a SEPARATE compact-context
+        # provider call (minimal system + last N messages) before the one-hop full-session path.
+        # Empty provider/model inherit the session's main runtime. Failures / TTFT over
+        # ttft_budget_ms fall back to the LAB-3 one-hop path unchanged.
         "telegram": {
             "fast_path": True,
+            "fast_lane": {
+                "enabled": True,
+                "provider": "",
+                "model": "",
+                "max_messages": 6,
+                "max_chars": 2000,
+                "ttft_budget_ms": 8000,
+            },
         },
         # Prefix user messages IN THE MODEL'S CONTEXT with a timestamp (e.g. "[Tue 2026-04-28
         # 13:40:53 CEST]") for temporal awareness. Persisted transcripts stay clean (timestamp is
