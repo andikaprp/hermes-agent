@@ -1658,24 +1658,13 @@ def _ensure_copilot_headers(client_kwargs: dict) -> None:
 def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: str, shared: bool):
     """Native Gemini client when the base_url is the Gemini API, else None."""
     from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-    from agent.gemini_oauth import gemini_native_auth_kwargs
     base_url = str(client_kwargs.get("base_url", "") or "")
     if not is_native_gemini_base_url(base_url):
         return None
     safe_kwargs = {
         k: v for k, v in client_kwargs.items()
-        if k in {"api_key", "base_url", "default_headers", "timeout", "http_client", "access_token", "use_oauth"}
+        if k in {"api_key", "base_url", "default_headers", "timeout", "http_client"}
     }
-    # Honour gemini.auth: oauth → Bearer from HermesTokenStorage; else x-goog-api-key.
-    auth_extra = {}
-    for key in ("default_headers", "timeout", "http_client", "access_token", "use_oauth"):
-        if safe_kwargs.get(key) not in (None, False, ""):
-            auth_extra[key] = safe_kwargs[key]
-    safe_kwargs = gemini_native_auth_kwargs(
-        str(safe_kwargs.get("api_key") or ""),
-        base_url=safe_kwargs.get("base_url"),
-        **auth_extra,
-    )
     if "http_client" not in safe_kwargs:
         keepalive_http = agent._build_keepalive_http_client(base_url, verify=httpx_verify)
         if keepalive_http is not None:

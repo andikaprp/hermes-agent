@@ -209,16 +209,6 @@ def _qwen_oauth_login(args) -> dict:
     return creds
 
 
-def _gemini_oauth_login(args) -> dict:
-    """Consent flow for Gemini API OAuth; tokens land in HermesTokenStorage (mcp-tokens/gemini-api)."""
-    from agent.gemini_oauth import run_gemini_oauth_login
-
-    return run_gemini_oauth_login(
-        open_browser=not getattr(args, "no_browser", False),
-        timeout_seconds=float(getattr(args, "timeout", None) or 300.0),
-    )
-
-
 @dataclass(frozen=True)
 class _OAuthAddSpec:
     """Per-provider parameters for the generic ``hermes auth add <provider> --type oauth`` path."""
@@ -231,8 +221,6 @@ class _OAuthAddSpec:
     # OpenRouter's PKCE exchange mints a plain API key (no refresh pair), so its pool entry is an
     # ``api_key`` row that happens to come from a browser login.
     auth_type: str = AUTH_TYPE_OAUTH
-    # When True, tokens are already persisted by login() (HermesTokenStorage); skip credential pool.
-    storage_only: bool = False
 
 
 _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
@@ -285,12 +273,6 @@ _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
         source=f"{SOURCE_MANUAL}:openrouter_pkce",
         fields=lambda creds, provider: {"base_url": _provider_base_url(provider)},
         auth_type=AUTH_TYPE_API_KEY),
-    "gemini": _OAuthAddSpec(
-        login=_gemini_oauth_login,
-        token=lambda creds: creds["access_token"],
-        source=f"{SOURCE_MANUAL}:gemini_oauth",
-        fields=lambda creds, provider: {},
-        storage_only=True),
 }
 
 
@@ -414,16 +396,6 @@ def _add_credential(args, provider: str, pool, requested_type: str) -> PooledCre
 
     creds = spec.login(args)
     token = spec.token(creds)
-    if getattr(spec, "storage_only", False):
-        # Gemini: HermesTokenStorage already holds the tokens; remind the config switch.
-        path = creds.get("token_file") or "mcp-tokens/gemini-api.json"
-        print(f"Saved Gemini OAuth tokens to {path}")
-        print("Set in config.yaml:\n  gemini:\n    auth: oauth")
-        # Synthetic pool entry so callers of auth_add_command still get a PooledCredential.
-        label = (getattr(args, "label", None) or "").strip() or "gemini-oauth"
-        return PooledCredential(
-            provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=spec.auth_type,
-            priority=0, source=spec.source, access_token=token)
     label = (getattr(args, "label", None) or "").strip() or label_from_token(
         token, f"{provider}-oauth-{len(pool.entries()) + 1}")
     # Every account gets a distinct, self-contained pool entry instead of routing through a

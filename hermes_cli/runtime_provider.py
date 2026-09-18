@@ -733,22 +733,6 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -
 
 def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model) -> Dict[str, Any]:
     """Registry ``api_key`` providers (z.ai/GLM, Kimi, MiniMax, copilot, …) from env/config."""
-    # Gemini OAuth (config ``gemini.auth: oauth``): Bearer token from HermesTokenStorage, not an API key.
-    if provider == "gemini":
-        try:
-            from agent.gemini_oauth import GeminiOAuthError, gemini_oauth_enabled, resolve_gemini_oauth_access_token
-            if gemini_oauth_enabled():
-                token = resolve_gemini_oauth_access_token()
-                base_url = (
-                    _config_base_url_for_provider(model_cfg, provider)
-                    or "https://generativelanguage.googleapis.com/v1beta"
-                ).rstrip("/")
-                return _runtime(
-                    provider, "chat_completions", base_url, token, source="oauth",
-                    requested_provider=requested_provider,
-                )
-        except GeminiOAuthError as exc:
-            raise AuthError(str(exc), provider=provider, code=getattr(exc, "code", "gemini_oauth_error")) from exc
     creds = resolve_api_key_provider_credentials(provider)
     # Actual Computer: a loopback model_cfg base_url selects the daemon's no-auth local API; inject
     # the placeholder BEFORE the usable-secret gate (mirrors the env-driven path).
