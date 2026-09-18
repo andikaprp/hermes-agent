@@ -149,7 +149,7 @@ def test_em_dash_filter_keeps_code_untouched_when_prose_also_has_a_dash():
 
 FILLER_CLOSERS = (
     "Got it, what's next?",
-    "Done. what's next?",
+    "Got it. what's next?",
     "Let me know if you need anything else.",
     "Let me know how it goes!",
     "Let me know how things go.",
