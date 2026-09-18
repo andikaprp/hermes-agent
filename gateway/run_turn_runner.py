@@ -1596,6 +1596,49 @@ class TurnRunner:
             user_config=ctx.user_config,
         )
 
+    def _try_fast_lane_or_conversation(
+        self, agent, agent_history, observed_group_context, persist_msg, persist_ts,
+        stream_delta_cb, *, model, runtime_kwargs,
+    ):
+        """LAB-52: compact fast lane for no-task turns; fall back to the LAB-3 one-hop path.
+
+        The fast lane is a SEPARATE provider call (never mutates the session cache prefix).
+        Any failure or TTFT over budget returns control to ``_run_conversation_with_approval``
+        exactly as before.
+        """
+        ctx = self._ctx
+        if ctx.fast_path_taken:
+            from gateway.run_turn_fast_lane import is_fast_lane_enabled, try_fast_lane
+            if is_fast_lane_enabled(ctx.user_config):
+                user_text = persist_msg if isinstance(persist_msg, str) else ctx.message
+                # When the note was prepended, persist_msg holds the clean user text.
+                if not isinstance(user_text, str):
+                    user_text = str(user_text or "")
+                main_runtime = {
+                    "model": model,
+                    **{k: runtime_kwargs.get(k) for k in (
+                        "provider", "base_url", "api_key", "api_mode",
+                    ) if runtime_kwargs.get(k)},
+                }
+                lane = try_fast_lane(
+                    history=agent_history,
+                    user_message=user_text,
+                    user_config=ctx.user_config,
+                    main_runtime=main_runtime,
+                    on_delta=stream_delta_cb,
+                    chat_id=getattr(ctx.source, "chat_id", None),
+                )
+                if lane is not None:
+                    # Keep the warm cached agent coherent with the turn we just wrote
+                    # (FTS/#50502: a shorter live list would otherwise lose this ack).
+                    if agent is not None and isinstance(lane.get("messages"), list):
+                        with suppress(Exception):
+                            agent._session_messages = list(lane["messages"])
+                    return lane
+        return self._run_conversation_with_approval(
+            agent, agent_history, observed_group_context, persist_msg, persist_ts,
+        )
+
     def _native_image_run_message(self):
         """Wrap the user turn as an OpenAI-style multimodal content list when
         _prepare_inbound_message_text buffered image paths; consume-and-clear so later turns on the
@@ -1870,7 +1913,10 @@ class TurnRunner:
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
         ctx.timing.mark("context_memory_pre_llm")
         ctx.timing.mark("api_start")
-        result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
+        result = self._try_fast_lane_or_conversation(
+            agent, agent_history, observed_group_context, persist_msg, persist_ts, stream_delta_cb,
+            model=model, runtime_kwargs=runtime_kwargs,
+        )
         ctx.timing.mark("api_end")
         if ctx.fast_path_taken:
             from gateway.run_turn_fast_path import log_fast_path_outcome

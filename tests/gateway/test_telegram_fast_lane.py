@@ -1,0 +1,367 @@
+"""LAB-52 compact fast lane: transcript builder + fail-soft fallback.
+
+These tests are red on main (module absent). They pin the behaviour contract:
+count + char budgets, always-include latest user message, no em/en dashes in
+builder output, and provider error → fall back to the one-hop path.
+"""
+
+from __future__ import annotations
+
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from gateway.run_turn_fast_lane import (
+    FAST_LANE_MARKER,
+    FAST_LANE_SYSTEM,
+    build_compact_transcript,
+    is_fast_lane_enabled,
+    load_fast_lane_config,
+    log_fast_lane,
+    sanitize_fast_lane_reply,
+    try_fast_lane,
+)
+
+
+def _history(*pairs):
+    """Build alternating user/assistant rows from (role, text) pairs."""
+    return [{"role": role, "content": text} for role, text in pairs]
+
+
+# ── compact transcript builder ────────────────────────────────────────────
+
+
+def test_builder_includes_system_and_latest_user():
+    msgs = build_compact_transcript([], "ya")
+    assert msgs[0] == {"role": "system", "content": FAST_LANE_SYSTEM}
+    assert msgs[-1] == {"role": "user", "content": "ya"}
+    assert "\u2014" not in FAST_LANE_SYSTEM
+    assert "\u2013" not in FAST_LANE_SYSTEM
+
+
+def test_builder_respects_message_count_limit():
+    history = _history(
+        ("user", "one"), ("assistant", "a1"),
+        ("user", "two"), ("assistant", "a2"),
+        ("user", "three"), ("assistant", "a3"),
+        ("user", "four"), ("assistant", "a4"),
+    )
+    msgs = build_compact_transcript(history, "latest", max_messages=3, max_chars=10_000)
+    # system + 3 turns
+    assert len(msgs) == 4
+    assert msgs[-1]["content"] == "latest"
+    assert all(m["role"] in ("system", "user", "assistant") for m in msgs)
+
+
+def test_builder_always_keeps_latest_user_when_over_char_budget():
+    history = _history(
+        ("user", "x" * 500), ("assistant", "y" * 500),
+        ("user", "z" * 500), ("assistant", "w" * 500),
+    )
+    msgs = build_compact_transcript(history, "KEEP_ME", max_messages=6, max_chars=50)
+    assert msgs[-1]["role"] == "user"
+    assert "KEEP_ME" in msgs[-1]["content"]
+    body_chars = sum(len(m["content"]) for m in msgs[1:])
+    assert body_chars <= 50
+
+
+def test_builder_truncates_oversized_latest_user_rather_than_dropping_it():
+    msgs = build_compact_transcript([], "Z" * 500, max_messages=6, max_chars=40)
+    assert len(msgs) == 2
+    assert msgs[-1]["role"] == "user"
+    assert msgs[-1]["content"].startswith("Z")
+    assert len(msgs[-1]["content"]) <= 41  # budget + optional ellipsis
+
+
+def test_builder_strips_tool_and_internal_rows():
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "content": "result"},
+        {"role": "system", "content": "ignore"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "[hermes:fast-path] note\n\nok"},
+    ]
+    msgs = build_compact_transcript(history, "bye", max_messages=10, max_chars=10_000)
+    roles = [m["role"] for m in msgs[1:]]
+    assert "tool" not in roles
+    assert "system" not in roles[1:] or all(m["role"] != "system" for m in msgs[1:])
+    assert not any("[hermes:" in (m.get("content") or "") for m in msgs[1:])
+    assert msgs[-1]["content"] == "bye"
+    assert {"role": "user", "content": "hi"} in msgs
+    assert {"role": "assistant", "content": "hello"} in msgs
+
+
+def test_builder_output_never_contains_em_or_en_dashes():
+    history = _history(
+        ("user", "wait\u2014really"),
+        ("assistant", "yes\u2013ok"),
+    )
+    msgs = build_compact_transcript(history, "cool\u2014thanks")
+    blob = "\n".join(m["content"] for m in msgs)
+    assert "\u2014" not in blob
+    assert "\u2013" not in blob
+
+
+def test_sanitize_reply_strips_em_dashes():
+    assert "\u2014" not in sanitize_fast_lane_reply("hi\u2014there\u2013friend")
+    assert sanitize_fast_lane_reply("  ok  ") == "ok"
+
+
+# ── config gate ───────────────────────────────────────────────────────────
+
+
+def test_fast_lane_defaults_on_when_absent():
+    assert is_fast_lane_enabled({}) is True
+    assert is_fast_lane_enabled(None) is True
+    cfg = load_fast_lane_config({})
+    assert cfg["max_messages"] == 6
+    assert cfg["max_chars"] == 2000
+    assert cfg["ttft_budget_ms"] == 8000
+
+
+@pytest.mark.parametrize("raw", [False, "false", "off", "0", "no"])
+def test_fast_lane_off_tokens(raw):
+    assert is_fast_lane_enabled({"gateway": {"telegram": {"fast_lane": {"enabled": raw}}}}) is False
+
+
+def test_fast_lane_config_from_user_yaml_loader(tmp_path):
+    from hermes_cli.config_effective import load_user_config_effective
+
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "gateway:\n  telegram:\n    fast_lane:\n      enabled: false\n      max_messages: 4\n",
+        encoding="utf-8",
+    )
+    cfg = load_user_config_effective(cfg_path)
+    assert is_fast_lane_enabled(cfg) is False
+    loaded = load_fast_lane_config(cfg)
+    assert loaded["max_messages"] == 4
+
+
+def test_default_config_declares_fast_lane_block():
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+    block = DEFAULT_CONFIG["gateway"]["telegram"]["fast_lane"]
+    assert block["enabled"] is True
+    assert block["max_messages"] >= 1
+    assert block["max_chars"] >= 1
+    assert block["ttft_budget_ms"] >= 1
+
+
+# ── metrics line ──────────────────────────────────────────────────────────
+
+
+def test_fast_lane_log_line_shape(caplog):
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        log_fast_lane(
+            provider="openrouter", ttft_ms=120.4, ready_ms=400.1,
+            fallback=False, chat_id="998877",
+        )
+    assert FAST_LANE_MARKER in caplog.text
+    assert "provider=openrouter" in caplog.text
+    assert "ttft_ms=120.4" in caplog.text
+    assert "ready_ms=400.1" in caplog.text
+    assert "fallback=false" in caplog.text
+    assert "998877" not in caplog.text
+
+
+# ── try_fast_lane: success + fallback ─────────────────────────────────────
+
+
+def _chunk(text: str):
+    return SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
+
+
+def test_try_fast_lane_streams_and_returns_session_shaped_result():
+    deltas: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        assert kwargs.get("stream") is True
+        assert kwargs["messages"][0]["role"] == "system"
+        assert kwargs["messages"][-1]["content"] == "ya"
+        return iter([_chunk("sip"), _chunk("!")])
+
+    result = try_fast_lane(
+        history=_history(("assistant", "halo")),
+        user_message="ya",
+        main_runtime={"provider": "test", "model": "m", "api_key": "k"},
+        on_delta=lambda t: deltas.append(t) if t else None,
+        call_llm_fn=fake_call_llm,
+    )
+    assert result is not None
+    assert result["final_response"] == "sip!"
+    assert result["api_calls"] == 1
+    assert result["agent_persisted"] is False
+    assert result["messages"][-2] == {"role": "user", "content": "ya"}
+    assert result["messages"][-1]["content"] == "sip!"
+    assert deltas == ["sip", "!"]
+
+
+def test_try_fast_lane_falls_back_on_provider_error(caplog):
+    def boom(**kwargs):
+        raise RuntimeError("upstream down")
+
+    with caplog.at_level(logging.INFO, logger="gateway.run_turn"):
+        result = try_fast_lane(
+            history=[],
+            user_message="hi",
+            main_runtime={"provider": "test", "model": "m", "api_key": "k"},
+            call_llm_fn=boom,
+            chat_id="42",
+        )
+    assert result is None
+    assert "fallback=true" in caplog.text
+    assert "42" not in caplog.text
+
+
+def test_try_fast_lane_falls_back_on_ttft_budget():
+    class _Clock:
+        def __init__(self):
+            self.now = 0.0
+
+        def __call__(self):
+            return self.now
+
+    clock = _Clock()
+
+    def slow_stream(**kwargs):
+        def _gen():
+            clock.now = 9.0  # past 8000ms budget before first content
+            yield _chunk("too late")
+        return _gen()
+
+    result = try_fast_lane(
+        history=[],
+        user_message="hi",
+        user_config={"gateway": {"telegram": {"fast_lane": {"ttft_budget_ms": 8000}}}},
+        main_runtime={"provider": "test", "model": "m", "api_key": "k"},
+        call_llm_fn=slow_stream,
+        clock=clock,
+    )
+    assert result is None
+
+
+def test_try_fast_lane_disabled_returns_none_without_calling_provider():
+    called = []
+
+    def fake(**kwargs):
+        called.append(1)
+        return iter([_chunk("x")])
+
+    result = try_fast_lane(
+        history=[],
+        user_message="hi",
+        user_config={"gateway": {"telegram": {"fast_lane": {"enabled": False}}}},
+        main_runtime={"provider": "test", "model": "m", "api_key": "k"},
+        call_llm_fn=fake,
+    )
+    assert result is None
+    assert called == []
+
+
+def test_runner_falls_back_to_one_hop_when_fast_lane_errors(monkeypatch):
+    """Fail-soft seam: provider error must reach ``_run_conversation_with_approval``."""
+    from gateway.config import Platform
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
+
+    class _Stub:
+        session_store = None
+
+        def _adapter_for_source(self, source):
+            return None
+
+    class _Source:
+        platform = Platform.TELEGRAM
+        chat_id = "4242"
+        chat_type = "dm"
+
+    ctx = TurnContext(
+        source=_Source(), message="ya", session_key="telegram:4242",
+        history=[], _run_still_current=lambda: True,
+        user_config={"gateway": {"telegram": {"fast_path": True, "fast_lane": {"enabled": True}}}},
+        fast_path_taken="ack",
+    )
+    runner = TurnRunner(_Stub(), ctx)
+    seen = {"conv": 0}
+
+    def fake_conv(*a, **k):
+        seen["conv"] += 1
+        return {
+            "final_response": "from-one-hop", "messages": [], "api_calls": 1,
+            "agent_persisted": True,
+        }
+
+    monkeypatch.setattr(
+        "gateway.run_turn_fast_lane.try_fast_lane",
+        lambda **kw: None,  # simulated provider/TTFT failure
+    )
+    monkeypatch.setattr(runner, "_run_conversation_with_approval", fake_conv)
+
+    out = runner._try_fast_lane_or_conversation(
+        agent=None, agent_history=[], observed_group_context=None,
+        persist_msg="ya", persist_ts=None, stream_delta_cb=None,
+        model="m", runtime_kwargs={"provider": "p", "api_key": "k"},
+    )
+    assert out["final_response"] == "from-one-hop"
+    assert seen["conv"] == 1
+
+
+def test_builder_does_not_emit_consecutive_user_rows():
+    history = _history(("user", "old"), ("assistant", "a"), ("user", "also inbound"))
+    msgs = build_compact_transcript(history, "also inbound", max_messages=10, max_chars=10_000)
+    roles = [m["role"] for m in msgs]
+    assert roles[-1] == "user"
+    assert "user,user" not in ",".join(roles)
+
+
+def test_runner_updates_cached_agent_messages_on_lane_success(monkeypatch):
+    from gateway.config import Platform
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
+
+    class _Stub:
+        session_store = None
+
+        def _adapter_for_source(self, source):
+            return None
+
+    class _Source:
+        platform = Platform.TELEGRAM
+        chat_id = "4242"
+        chat_type = "dm"
+
+    class _Agent:
+        _session_messages = [{"role": "assistant", "content": "stale"}]
+
+    ctx = TurnContext(
+        source=_Source(), message="ya", session_key="telegram:4242",
+        history=[], _run_still_current=lambda: True,
+        user_config={"gateway": {"telegram": {"fast_path": True, "fast_lane": {"enabled": True}}}},
+        fast_path_taken="ack",
+    )
+    runner = TurnRunner(_Stub(), ctx)
+    agent = _Agent()
+    lane_result = {
+        "final_response": "sip",
+        "messages": [
+            {"role": "assistant", "content": "halo"},
+            {"role": "user", "content": "ya"},
+            {"role": "assistant", "content": "sip"},
+        ],
+        "api_calls": 1, "agent_persisted": False, "completed": True, "failed": False,
+    }
+    monkeypatch.setattr("gateway.run_turn_fast_lane.try_fast_lane", lambda **kw: lane_result)
+    monkeypatch.setattr(
+        runner, "_run_conversation_with_approval",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no fallback")),
+    )
+    out = runner._try_fast_lane_or_conversation(
+        agent=agent, agent_history=[{"role": "assistant", "content": "halo"}],
+        observed_group_context=None, persist_msg="ya", persist_ts=None,
+        stream_delta_cb=None, model="m", runtime_kwargs={"provider": "p", "api_key": "k"},
+    )
+    assert out is lane_result
+    assert agent._session_messages == lane_result["messages"]
