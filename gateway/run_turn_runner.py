@@ -1643,6 +1643,11 @@ class TurnRunner:
                         "provider", "base_url", "api_key", "api_mode",
                     ) if runtime_kwargs.get(k)},
                 }
+                # OpenCode Go rejects MissingSessionID without x-opencode-session.
+                # Reuse the turn's session identity (same key the main agent uses).
+                _affinity = (ctx.session_id or ctx.session_key or "").strip()
+                if _affinity:
+                    main_runtime["session_id"] = _affinity
                 lane = try_fast_lane(
                     history=agent_history,
                     user_message=user_text,

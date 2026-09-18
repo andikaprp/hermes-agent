@@ -365,3 +365,87 @@ def test_runner_updates_cached_agent_messages_on_lane_success(monkeypatch):
     )
     assert out is lane_result
     assert agent._session_messages == lane_result["messages"]
+
+
+def test_try_fast_lane_carries_opencode_session_affinity():
+    """LAB-52: opencode-go lane must send x-opencode-session (else HTTP 400 MissingSessionID)."""
+    captured: list[dict] = []
+
+    def fake_call_llm(**kwargs):
+        captured.append(kwargs)
+        return iter([_chunk("sip")])
+
+    result = try_fast_lane(
+        history=[],
+        user_message="ya",
+        main_runtime={
+            "provider": "opencode-go",
+            "model": "glm-5",
+            "api_key": "k",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_mode": "chat_completions",
+            "session_id": "sess-affinity-lab52",
+        },
+        call_llm_fn=fake_call_llm,
+    )
+    assert result is not None
+    assert len(captured) == 1
+    kw = captured[0]
+    assert (kw.get("main_runtime") or {}).get("session_id") == "sess-affinity-lab52"
+    headers = kw.get("extra_headers") or {}
+    assert headers.get("x-opencode-session") == "sess-affinity-lab52"
+
+
+def test_runner_passes_session_identity_into_fast_lane_runtime(monkeypatch):
+    """Runner must put ctx.session_id into main_runtime for the lane."""
+    from gateway.config import Platform
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
+
+    class _Stub:
+        session_store = None
+
+        def _adapter_for_source(self, source):
+            return None
+
+    class _Source:
+        platform = Platform.TELEGRAM
+        chat_id = "4242"
+        chat_type = "dm"
+
+    seen: dict = {}
+
+    def capture_lane(**kwargs):
+        seen["main_runtime"] = dict(kwargs.get("main_runtime") or {})
+        return {
+            "final_response": "sip",
+            "messages": [{"role": "user", "content": "ya"}, {"role": "assistant", "content": "sip"}],
+            "api_calls": 1, "agent_persisted": False, "completed": True, "failed": False,
+        }
+
+    ctx = TurnContext(
+        source=_Source(), message="ya", session_key="telegram:4242",
+        session_id="sess-affinity-lab52",
+        history=[], _run_still_current=lambda: True,
+        user_config={"gateway": {"telegram": {"fast_path": True, "fast_lane": {"enabled": True}}}},
+        fast_path_taken="ack",
+    )
+    runner = TurnRunner(_Stub(), ctx)
+    monkeypatch.setattr("gateway.run_turn_fast_lane.try_fast_lane", capture_lane)
+    monkeypatch.setattr(
+        runner, "_run_conversation_with_approval",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no fallback")),
+    )
+    runner._try_fast_lane_or_conversation(
+        agent=None, agent_history=[], observed_group_context=None,
+        persist_msg="ya", persist_ts=None, stream_delta_cb=None,
+        model="glm-5",
+        runtime_kwargs={
+            "provider": "opencode-go",
+            "base_url": "https://opencode.ai/zen/go/v1",
+            "api_key": "k",
+            "api_mode": "chat_completions",
+        },
+    )
+    assert seen["main_runtime"].get("session_id") == "sess-affinity-lab52"
+    assert seen["main_runtime"].get("provider") == "opencode-go"
