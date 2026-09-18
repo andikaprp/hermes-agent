@@ -72,6 +72,11 @@ _MISSING_KEY_ERROR = (
     "environment / ~/.hermes/.env (get one at https://aistudio.google.com/app/apikey), or run `hermes setup` to "
     "configure the Google provider."
 )
+_MISSING_OAUTH_ERROR = (
+    "Gemini native client is configured for OAuth, but no access token was provided. Run "
+    "`hermes auth add gemini --type oauth` after placing google_client_secret.json in your Hermes home, "
+    "or set gemini.auth: api_key in config.yaml to use an API key instead."
+)
 
 
 def bare_gemini_model_id(model: str) -> str:
@@ -696,12 +701,23 @@ class GeminiNativeClient:
     HERMES_SKIP_TRANSPORT_WRAP = True
 
     def __init__(
-        self, *, api_key: str, base_url: Optional[str] = None, default_headers: Optional[Dict[str, str]] = None,
-        timeout: Any = None, http_client: Optional[httpx.Client] = None, **_: Any,
+        self, *, api_key: str = "", base_url: Optional[str] = None, default_headers: Optional[Dict[str, str]] = None,
+        timeout: Any = None, http_client: Optional[httpx.Client] = None, access_token: Optional[str] = None,
+        use_oauth: bool = False, **_: Any,
     ) -> None:
-        if not (api_key or "").strip():
+        # OAuth slot wins when configured: Bearer access token (from HermesTokenStorage) instead of
+        # x-goog-api-key. Fail closed when OAuth is selected but the token is missing/blank.
+        token = (access_token or "").strip()
+        key = (api_key or "").strip()
+        if use_oauth or token:
+            if not token:
+                raise RuntimeError(_MISSING_OAUTH_ERROR)
+            self._access_token, self.api_key, self._auth_mode = token, token, "oauth"
+        elif key:
+            self._access_token, self.api_key, self._auth_mode = None, key, "api_key"
+        else:
             raise RuntimeError(_MISSING_KEY_ERROR)
-        self.api_key, self.is_closed = api_key, False
+        self.is_closed = False
         self.base_url = normalize_gemini_base_url(base_url)
         self._default_headers = dict(default_headers or {})
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
@@ -720,8 +736,18 @@ class GeminiNativeClient:
         self.close()
 
     def _headers(self) -> Dict[str, str]:
-        return {"Content-Type": "application/json", "Accept": "application/json", "x-goog-api-key": self.api_key,
-                "User-Agent": f"{_API_CLIENT} (gemini-native)", "X-Goog-Api-Client": _API_CLIENT, **self._default_headers}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": f"{_API_CLIENT} (gemini-native)",
+            "X-Goog-Api-Client": _API_CLIENT,
+            **self._default_headers,
+        }
+        if self._auth_mode == "oauth" and self._access_token:
+            headers["Authorization"] = f"Bearer {self._access_token}"
+        else:
+            headers["x-goog-api-key"] = self.api_key
+        return headers
 
     @staticmethod
     def _advance_stream_iterator(iterator: Iterator[_GeminiStreamChunk]) -> tuple[bool, Optional[_GeminiStreamChunk]]:
