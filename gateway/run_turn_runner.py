@@ -1531,7 +1531,10 @@ class TurnRunner:
         # trivial-prompt match, and a turn that carries one is not an ordinary social reply.
         fast_path_reason_ = self._fast_path_reason(agent_history)
         ctx_message_at_entry = ctx.message
+        rebind_branch: Optional[str] = None
         self._prepend_pending_note("_pending_model_notes")
+        if ctx.message is not ctx_message_at_entry:
+            rebind_branch = "pending_model_notes"
         # Auto-continue: history ending with a tool result means the previous turn was cut off
         # (restart, crash, SIGTERM). Session-level resume_pending (drain-timeout shutdown) uses
         # stronger reason-aware wording that subsumes this case. Both gate on the age of
@@ -1552,10 +1555,12 @@ class TurnRunner:
         )
         if resume_pending and (interruption_is_fresh or mark_is_fresh):
             # Empty message = the startup auto-resume turn; there is no NEW user message.
+            rebind_branch = "resume_pending"
             ctx.message, persist_override = _prepare_resume_pending_message(
                 resume_reason, ctx.message, interactive=self._resume_note_interactive(),
             )
         elif agent_history and agent_history[-1].get("role") == "tool" and interruption_is_fresh:
+            rebind_branch = "tool_last"
             persist_override = ctx.message
             ctx.message = (
                 "[System note: A new message has arrived. The conversation "
@@ -1564,13 +1569,31 @@ class TurnRunner:
                 "below FIRST. Do NOT re-execute old tool calls from the history.]\n\n"
                 + ctx.message
             )
+        before_skills = ctx.message
         self._prepend_pending_note("_pending_skills_reload_notes")
+        if ctx.message is not before_skills and rebind_branch is None:
+            rebind_branch = "pending_skills_reload_notes"
         # Safety net: a startup auto-resume event carries empty text; if the resume_pending branch
         # did not fire (freshness signals disagreed, marker cleared) we must NOT hand the model a blank
         # user turn. Restricted to resume_pending sessions so caption-less image turns are untouched.
         if isinstance(ctx.message, str) and not ctx.message.strip() and resume_pending:
+            rebind_branch = "resume_safety_net"
             ctx.message = build_resume_recovery_note(resume_reason, "", interactive=self._resume_note_interactive())
-        if fast_path_reason_ and ctx.message is ctx_message_at_entry:
+        identity_ok = ctx.message is ctx_message_at_entry
+        # Compact ops line: reason / identity / which note claimed the message. Surfaces the
+        # LAB-52 live miss (reason=- while identity held) without logging every task turn.
+        if fast_path_reason_ is not None or rebind_branch is not None or (
+            isinstance(ctx_message_at_entry, str) and ctx_message_at_entry.lstrip().startswith("[")
+        ):
+            entry_len = len(ctx_message_at_entry) if isinstance(ctx_message_at_entry, str) else None
+            cur_len = len(ctx.message) if isinstance(ctx.message, str) else None
+            logger.info(
+                "[latency] fast_path_gate reason=%s identity=%s rebind=%s "
+                "entry_len=%s msg_len=%s entry_type=%s",
+                fast_path_reason_ or "-", identity_ok, rebind_branch or "-",
+                entry_len, cur_len, type(ctx_message_at_entry).__name__,
+            )
+        if fast_path_reason_ and identity_ok:
             # Only when nothing else claimed the message: a recovery or resume note means the
             # turn has state to reconcile, which is exactly when the loop should stay open.
             from gateway.run_turn_fast_path import apply_fast_path_note

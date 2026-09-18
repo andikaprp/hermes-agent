@@ -88,6 +88,42 @@ def test_directive_words_never_take_the_fast_path(text):
         assert classify_fast_path(text, history=history) is None
 
 
+def test_a_timestamp_rendered_message_is_still_classified():
+    """Production prepends a timestamp render to every inbound user message.
+
+    ``gateway.message_timestamps.enabled`` is on for this deployment, so the classifier is
+    handed ``[Thu 2026-09-17 21:54:28 WIB] hi``, not ``hi``. That leading ``[`` used to read
+    as a machine work trigger, which meant *every* live message was judged not-ordinary and
+    the fast path never fired in production — while every test here passed, because every
+    test passes a clean string.
+    """
+    from zoneinfo import ZoneInfo
+
+    from gateway.message_timestamps import render_user_content_with_timestamp
+
+    tz = ZoneInfo("Asia/Jakarta")
+    for text, expected in (("hi", "social"), ("ok", "ack"), ("thanks", "social"), ("ya", "ack")):
+        rendered = render_user_content_with_timestamp(text, 1758113668.0, tz=tz)
+        assert rendered.startswith("[") and rendered.endswith(text), rendered
+        assert classify_fast_path(rendered, history=ASSISTANT_STATED) == expected, rendered
+
+
+def test_stripping_the_timestamp_does_not_blunt_the_machine_trigger_guard():
+    """Stripping the render must leave a real bracketed machine notice still rejected."""
+    from zoneinfo import ZoneInfo
+
+    from gateway.message_timestamps import render_user_content_with_timestamp
+
+    tz = ZoneInfo("Asia/Jakarta")
+    for text in (
+        "[ASYNC DELEGATION BATCH 3] check the results",
+        "[IMPORTANT: Background process completed] report to user",
+        "[cron] nightly backup finished",
+    ):
+        rendered = render_user_content_with_timestamp(text, 1758113668.0, tz=tz)
+        assert classify_fast_path(rendered, history=None) is None, rendered
+
+
 @pytest.mark.parametrize("text", ["done", "done?"])
 def test_done_stays_off_the_fast_path_deliberately(text):
     """Deliberate, not a miss. Do not "fix" this.
@@ -323,6 +359,48 @@ def test_an_ordinary_dm_turn_gets_the_note_without_polluting_the_transcript():
 
     assert ctx.message.startswith(FAST_PATH_NOTE)  # what the model sees
     assert persist_override == "hi"  # what the transcript keeps
+
+
+def test_live_timestamp_rendered_dm_ack_sets_fast_path_taken():
+    """LAB-52 live miss: message_timestamps render precedes the classifier.
+
+    Reproduce the production shape at the runner gate: Telegram DM, ``user_config={}``,
+    history set, message = ``[Wed … WIB] ok``. Before the timestamp strip, ``fast_path_reason``
+    was None (leading ``[``), so ``ctx.fast_path_taken`` stayed unset and the LAB-52 fast lane
+    never ran — while clean-string classifier probes still passed.
+    """
+    from zoneinfo import ZoneInfo
+
+    from gateway.message_timestamps import render_user_content_with_timestamp
+
+    rendered = render_user_content_with_timestamp("ok", 1758113668.0, tz=ZoneInfo("Asia/Jakarta"))
+    assert rendered.startswith("[")
+    runner, ctx = _turn_runner(rendered)
+    ctx.user_config = {}
+    ctx.history = list(ASSISTANT_STATED)
+    runner._prepare_turn_message(list(ASSISTANT_STATED))
+    assert ctx.fast_path_taken == "ack"
+    assert ctx.message.startswith(FAST_PATH_NOTE)
+
+
+def test_resume_recovery_blocks_fast_path_taken_even_for_timestamped_ack():
+    """Recovery/resume notes must still claim the message; fast path stays closed."""
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    from gateway.message_timestamps import render_user_content_with_timestamp
+
+    rendered = render_user_content_with_timestamp("ok", 1758113668.0, tz=ZoneInfo("Asia/Jakarta"))
+    runner, ctx = _turn_runner(rendered)
+    ctx.user_config = {}
+    ctx.history = list(ASSISTANT_STATED)
+    entry = SimpleNamespace(
+        resume_pending=True, resume_reason="restart_timeout", last_resume_marked_at=None,
+    )
+    runner._runner.session_store = SimpleNamespace(_entries={ctx.session_key: entry})
+    runner._prepare_turn_message(list(ASSISTANT_STATED))
+    assert ctx.fast_path_taken is None
+    assert FAST_PATH_NOTE not in ctx.message
 
 
 def test_a_turn_that_needs_tools_reaches_the_model_untouched():
