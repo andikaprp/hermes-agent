@@ -42,9 +42,9 @@ _TEAM_NAME = "Labs"        # what the MCP tool accepts as `team`
 _STATE_FILTER = "started"  # Linear's built-in "In Progress" state type
 _MAX_ISSUES = 5
 _MAX_TITLE_CHARS = 100
-_TTL_SECONDS = 60.0
-_FETCH_TIMEOUT_SECONDS = 2.0
-_TOTAL_BUDGET_SECONDS = 2.5
+_TTL_SECONDS = 300.0
+_FETCH_TIMEOUT_SECONDS = 1.0
+_TOTAL_BUDGET_SECONDS = 1.5
 _SSE_DATA_RE = re.compile(r"^data:\s*(\{.*\})\s*$", re.MULTILINE)
 
 #: TTL cache per profile home: ``str(home) -> (monotonic stamp, note_or_None)``.
