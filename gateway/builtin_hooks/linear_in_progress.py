@@ -6,10 +6,15 @@ the standing convention "check in-progress Linear issues at the start of any
 real task". The note rides the user message via the api_content sidecar seam
 (never the system prompt, so prompt caching stays intact).
 
+Why MCP and not the GraphQL API: the cached OAuth token belongs to the Linear
+MCP server (``hermes_issuer = https://mcp.linear.app``), so it authenticates to
+``https://mcp.linear.app/mcp``, not to ``api.linear.app/graphql``. The hook
+therefore speaks MCP Streamable HTTP (a single ``tools/call list_issues``)
+through the same token the MCP client already keeps fresh.
+
 Fail-closed by design:
-  * reuses the Linear MCP integration's cached OAuth access token
-    (``HERMES_HOME/mcp-tokens/linear.json``, the file
-    ``tools.mcp_oauth.HermesTokenStorage`` owns) so no new secret plumbing;
+  * reuses that cached token (``HERMES_HOME/mcp-tokens/linear.json``, owned by
+    ``tools.mcp_oauth.HermesTokenStorage``) so no new secret plumbing;
   * never refreshes tokens (a refresh POST could burn the MCP runtime's
     single-use refresh token); expired/missing token means NO note;
   * any failure (no token, network error, timeout, malformed payload, 401)
@@ -30,25 +35,17 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("gateway.hooks")
 
-_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql"
+_MCP_ENDPOINT = "https://mcp.linear.app/mcp"
+_MCP_TOOL = "list_issues"
 _TEAM_KEY = "LAB"          # Labs team; issue identifiers are LAB-*
-_ISSUE_PREFIX = "LAB-"    # defensive identifier filter
-_STATE_TYPE_FILTER = "started"  # Linear's built-in "In Progress" state type
+_TEAM_NAME = "Labs"        # what the MCP tool accepts as `team`
+_STATE_FILTER = "started"  # Linear's built-in "In Progress" state type
 _MAX_ISSUES = 5
 _MAX_TITLE_CHARS = 100
 _TTL_SECONDS = 60.0
 _FETCH_TIMEOUT_SECONDS = 2.0
 _TOTAL_BUDGET_SECONDS = 2.5
-
-_QUERY = """
-query InProgressIssues($teamKey: String!) {
-  team(key: $teamKey) {
-    issues(filter: { state: { type: { eq: "started" } } }, first: 6, orderBy: updatedAt) {
-      nodes { identifier title }
-    }
-  }
-}
-"""
+_SSE_DATA_RE = re.compile(r"^data:\s*(\{.*\})\s*$", re.MULTILINE)
 
 #: TTL cache per profile home: ``str(home) -> (monotonic stamp, note_or_None)``.
 _CACHE: Dict[str, Tuple[float, Optional[str]]] = {}
@@ -62,24 +59,37 @@ def _clean_title(title: str) -> str:
     return cleaned
 
 
-def parse_in_progress(payload: Optional[Dict[str, Any]], *, team_key: str = _TEAM_KEY) -> List[Tuple[str, str]]:
-    """Extract ``(identifier, title)`` rows from a Linear GraphQL response; [] when malformed."""
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+def parse_mcp_issues(result: Optional[Dict[str, Any]], *, team_key: str = _TEAM_KEY) -> List[Tuple[str, str]]:
+    """Extract ``(identifier, title)`` rows from an MCP ``tools/call`` result; [] when malformed.
+
+    The Linear MCP ``list_issues`` tool wraps its payload as
+    ``result.content[0].text`` holding ``{"issues": [{"id", "title", ...}]}``.
+    """
+    if not isinstance(result, dict):
         return []
-    team = payload["data"].get("team")
-    if not isinstance(team, dict):
+    payload: Any = result.get("result", result)
+    content = payload.get("content") if isinstance(payload, dict) else None
+    text = None
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                text = part["text"]
+                break
+    if text is None:
         return []
-    issues = team.get("issues")
-    nodes = issues.get("nodes") if isinstance(issues, dict) else None
-    if not isinstance(nodes, list):
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return []
+    issues = data.get("issues") if isinstance(data, dict) else None
+    if not isinstance(issues, list):
         return []
     prefix = f"{team_key}-"
     rows: List[Tuple[str, str]] = []
-    for node in nodes:
-        if not isinstance(node, dict):
+    for issue in issues:
+        if not isinstance(issue, dict):
             continue
-        identifier = node.get("identifier")
-        title = node.get("title")
+        identifier, title = issue.get("id"), issue.get("title")
         if not isinstance(identifier, str) or not isinstance(title, str):
             continue
         if not identifier.startswith(prefix):
@@ -102,36 +112,52 @@ def build_note(rows: Sequence[Tuple[str, str]], *, team_key: str = _TEAM_KEY) ->
     )
 
 
-def _request_graphql(access_token: str, query: str, variables: Dict[str, Any], *, timeout: float) -> Optional[Dict[str, Any]]:
-    """POST one GraphQL query; None on any HTTP/network/parse failure (caller catches)."""
-    body = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+def _mcp_call(access_token: str, tool: str, arguments: Dict[str, Any], *, timeout: float) -> Dict[str, Any]:
+    """One ``tools/call`` against the Linear MCP server; raises on HTTP/parse failure (caller catches)."""
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }).encode("utf-8")
     req = urllib.request.Request(
-        _GRAPHQL_ENDPOINT,
+        _MCP_ENDPOINT,
         data=body,
         headers={
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
-            "Accept": "application/json",
+            "Accept": "application/json, text/event-stream",
         },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read().decode("utf-8")
+    match = _SSE_DATA_RE.search(raw)
+    if match:
+        return json.loads(match.group(1))
+    return json.loads(raw)
 
 
 def fetch_in_progress(
     access_token: str,
     *,
     team_key: str = _TEAM_KEY,
+    team_name: str = _TEAM_NAME,
+    limit: int = 6,
     timeout: float = _FETCH_TIMEOUT_SECONDS,
 ) -> List[Tuple[str, str]]:
     """In-progress Linear issues for the team; [] on any failure (never raises)."""
     try:
-        payload = _request_graphql(access_token, _QUERY, {"teamKey": team_key}, timeout=timeout)
-    except Exception:
-        logger.debug("linear-in-progress: fetch failed (%s)", type(__import__("sys").exc_info()[1]).__name__)
+        result = _mcp_call(
+            access_token,
+            _MCP_TOOL,
+            {"state": _STATE_FILTER, "team": team_name, "limit": limit},
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.debug("linear-in-progress: fetch failed (%s)", type(exc).__name__)
         return []
-    return parse_in_progress(payload, team_key=team_key)
+    return parse_mcp_issues(result, team_key=team_key)
 
 
 def _read_cached_access_token(home: Path) -> Optional[str]:
