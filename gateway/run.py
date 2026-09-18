@@ -653,8 +653,10 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     text = _sanitize_surrogates(str(text))
 
     # Cancellation metadata, not prose; ACP/TUI already suppress this sentinel, chat surfaces should too.
-    # See #7921.
-    if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
+    # See #7921.  The conversation loop may also return this exact legacy marker for a direct
+    # interrupted turn (before a queued Telegram correction is promoted); it is never a user reply.
+    stripped = str(text).strip()
+    if stripped.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX) or stripped.lower() == "[response interrupted]":
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
@@ -2701,7 +2703,7 @@ _CONTROL_INTERRUPT_MESSAGES = frozenset({
     _INTERRUPT_REASON_STOP.lower(), _INTERRUPT_REASON_RESET.lower(),
     _INTERRUPT_REASON_TIMEOUT.lower(), _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
     _INTERRUPT_REASON_EVICTED.lower(), _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
-    _INTERRUPT_REASON_GATEWAY_RESTART.lower()})
+    _INTERRUPT_REASON_GATEWAY_RESTART.lower(), "[response interrupted]"})
 
 
 def _is_control_interrupt_message(message: Optional[str]) -> bool:

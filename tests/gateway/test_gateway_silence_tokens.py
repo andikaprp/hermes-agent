@@ -53,6 +53,7 @@ def _runner(monkeypatch, tmp_path):
     runner._should_send_voice_reply = lambda *_a, **_kw: False
     runner.hooks = MagicMock()
     runner.hooks.emit = AsyncMock()
+    runner.hooks.emit_collect = AsyncMock(return_value=[])
 
     runner.session_store = MagicMock()
     runner.session_store.get_or_create_session.return_value = SessionEntry(
@@ -81,6 +82,23 @@ def _runner(monkeypatch, tmp_path):
 def test_exact_silence_tokens_are_intentional_silence():
     for token in ("[SILENT]", " SILENT ", "NO_REPLY", "no reply"):
         assert is_intentional_silence_response(token)
+
+
+@pytest.mark.asyncio
+async def test_interrupted_marker_is_suppressed_at_pending_drain_without_followup(monkeypatch, tmp_path):
+    runner = _runner(monkeypatch, tmp_path)
+    adapter = MagicMock()
+    adapter.get_pending_message.return_value = None
+    runner._promote_queued_event = MagicMock(return_value=None)
+
+    pending_event, pending = await runner._run_agent_drain_pending(
+        {"interrupted": True, "interrupt_message": "[response interrupted]"},
+        adapter, _source(), "agent:main:telegram:group:-1001:12345",
+    )
+
+    assert pending_event is None
+    assert pending is None
+    assert gateway_run._is_control_interrupt_message("[response interrupted]")
 
 
 def test_blank_and_prose_mentions_are_not_silence():
@@ -211,6 +229,59 @@ async def test_queued_terminal_turn_owns_the_silence_verdict(monkeypatch, tmp_pa
     response = await runner._handle_message_with_agent(
         _event(internal=True), _source(), "agent:main:telegram:group:-1001:12345", 1)
     assert "silence marker" in response
+
+
+@pytest.mark.asyncio
+async def test_debounced_telegram_correction_suppresses_the_stale_queued_draft(monkeypatch, tmp_path):
+    """A quiet-window correction replaces the in-progress reply without a status reply."""
+    runner = _runner(monkeypatch, tmp_path)
+    runner._MAX_INTERRUPT_DEPTH = 8
+    runner._run_agent = AsyncMock(return_value={"final_response": "final combined answer", "messages": []})
+    runner._is_goal_continuation_event = MagicMock(return_value=False)
+    runner._session_key_for_source = MagicMock(return_value="agent:main:telegram:group:-1001:12345")
+    runner._prepare_profile_scoped_inbound_message_text = AsyncMock(
+        return_value="first correction\nsecond correction\nfinal correction")
+    runner._adapter_for_source = MagicMock(return_value=None)
+    runner._refresh_agent_cache_message_count = AsyncMock()
+    runner._deliver_queued_first_response = AsyncMock()
+    turn_ctx = SimpleNamespace(
+        source=_source(), session_id="sid", session_key="agent:main:telegram:group:-1001:12345",
+        run_generation=1, _interrupt_depth=0, history=[], _status_thread_metadata=None,
+        context_prompt=None, result_holder=[None],
+    )
+    pending_event = MessageEvent(text="first correction\nsecond correction\nfinal correction", source=_source())
+    pending_event._gateway_busy_text_debounced = True
+
+    result = await gateway_run.GatewayRunner._run_agent_queued_followup(
+        runner, turn_ctx, adapter=None, pending=pending_event.text, pending_event=pending_event,
+        response="[response interrupted]",
+        result={"interrupted": True, "final_response": "[response interrupted]", "messages": []},
+        stream_task=None,
+    )
+
+    assert result["final_response"] == "final combined answer"
+    runner._deliver_queued_first_response.assert_not_awaited()
+    runner._handle_active_session_busy_message.assert_not_awaited()
+    runner._run_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_interrupted_telegram_correction_delivers_only_latest_terminal_reply(monkeypatch, tmp_path):
+    """A direct interrupted result is transport noise; the correction owns the one reply."""
+    from gateway.run import _sanitize_gateway_final_response
+
+    raw_turns = ["[response interrupted]", "Actually, no — the latest correction is the answer."]
+    delivered = [
+        _sanitize_gateway_final_response(Platform.TELEGRAM, reply)
+        for reply in raw_turns
+    ]
+    delivered = [reply for reply in delivered if reply]
+
+    assert len(delivered) == 1
+    assert delivered[0].startswith("Actually, no,")
+    assert "latest correction is the answer" in delivered[0]
+    assert all("[response interrupted]" not in reply for reply in delivered)
+    assert all(not any(token in reply.lower() for token in ("cancel", "queue", "status")) for reply in delivered)
 
 
 @pytest.mark.asyncio

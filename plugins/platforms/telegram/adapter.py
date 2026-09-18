@@ -23,6 +23,15 @@ from gateway.platforms._shared import (
     extra_or_secret as _extra_or_secret, get_scoped_secret as _get_scoped_secret,
     platform_gate_env as _scoped_gate_env,
 )
+from gateway.telegram_delivery_receipt import TelegramDeliveryReceipt
+from gateway.telegram_reaction_receipt import (
+    LOCAL_NO_BOT,
+    PHASE_CANCELLED,
+    PHASE_COMPLETE,
+    PHASE_DIRECT,
+    PHASE_START,
+    TelegramReactionReceipt,
+)
 
 try:  # never let a formatting helper break a send: identity is the safe fallback
     from gateway.delivery_voice import normalize_stream_dashes as _normalize_stream_dashes
@@ -427,6 +436,14 @@ class TelegramAdapter(BasePlatformAdapter):
     _TEXT_BATCH_SHORT_LEN = 1024
     _TEXT_BATCH_SHORT_DELAY_S = 0.24
 
+    # Conversational-DM quiet window, mirrored from the ``__init__`` config reads below.
+    # ``_text_batch_delay_for`` runs inside the flush task, where an AttributeError is swallowed
+    # into a never-retrieved task exception and the buffered burst is lost with no user-visible
+    # error — so every knob it reads needs a class-level value, not only an instance one.
+    _conversational_dm_batching: bool = False
+    _text_batch_quiet_seconds: float = 2.0
+    _text_batch_max_wait_seconds: float = 5.0
+
     @staticmethod
     def _env_float_clamped(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
         """Read a float env var; non-finite → default; clamp to bounds (safe for asyncio.sleep)."""
@@ -497,6 +514,11 @@ class TelegramAdapter(BasePlatformAdapter):
             "HERMES_TELEGRAM_TEXT_BATCH_DELAY_SECONDS", 0.3, min_value=0.08, max_value=2.0)
         self._text_batch_split_delay_seconds = self._env_float_clamped(
             "HERMES_TELEGRAM_TEXT_BATCH_SPLIT_DELAY_SECONDS", 1.0, min_value=self._text_batch_delay_seconds, max_value=4.0)
+        self._conversational_dm_batching = self._coerce_bool_extra("conversational_dm_batching", False)
+        self._text_batch_quiet_seconds = self._coerce_float_extra(
+            "text_batch_quiet_seconds", 2.0, min_value=0.2, max_value=5.0)
+        self._text_batch_max_wait_seconds = self._coerce_float_extra(
+            "text_batch_max_wait_seconds", 5.0, min_value=self._text_batch_quiet_seconds, max_value=15.0)
         self._drop_delayed_deliveries = False
         # Held across disconnect: PTB advances the offset before our drop-guard runs, so Telegram won't
         # redeliver — dropping is permanent loss (see _hold_inbound_event).
@@ -1454,6 +1476,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if routing is None:
             return None
         reply_to_id, thread_kwargs = routing
+        # One receipt for this rich delivery attempt (see gateway.telegram_delivery_receipt); the
+        # `return None` capability fallback below emits nothing because legacy send() then delivers.
+        receipt = TelegramDeliveryReceipt(
+            chat_id=chat_id, attempt=1, reply_anchor=reply_to_id is not None,
+            thread_id=thread_kwargs.get("message_thread_id") or thread_kwargs.get("direct_messages_topic_id"))
         payload = self._rich_payload_base(chat_id, content)
         # Only non-None routing keys: direct_messages_topic_id is paired with message_thread_id=None.
         payload.update({k: v for k, v in thread_kwargs.items() if v is not None})
@@ -1474,6 +1501,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 _m = re.search(r"retry\s+(?:in\s+)?(\d+)", str(exc).lower(), re.IGNORECASE)
                 if _m:
                     _retry_after = float(_m.group(1))
+            receipt.failed()
             return self._rich_transient_result(exc, "sendRichMessage", retry_after=_retry_after)
         if isinstance(msg, dict):
             message_id = msg.get("message_id")
@@ -1483,6 +1511,7 @@ class TelegramAdapter(BasePlatformAdapter):
             message_id = getattr(msg, "message_id", None)
         if message_id is not None:
             self._record_rich_sent(chat_id, message_id, content)
+        receipt.succeeded(message_id)
         return SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
 
     def _rich_payload_base(self, chat_id: str, content: str) -> Dict[str, Any]:
@@ -3314,11 +3343,15 @@ class TelegramAdapter(BasePlatformAdapter):
         """Deliver one chunk: routing, up to 3 attempts, thread-not-found / deleted-anchor / flood handling.
 
         Returns ``(msg, used_thread_fallback)`` on success or a ``SendResult`` to return verbatim (fail-loud DM-topic
-        cases, flood cap); raises anything the caller's classifier should see."""
+        cases, flood cap); raises anything the caller's classifier should see. Every platform attempt emits one
+        redacted, content-free receipt (``gateway.telegram_delivery_receipt``)."""
         _NetErr, _BadReq, _TimedOut = error_types
         retried_thread_not_found = False
         private_dm_topic_send, dm_topic_reply_to_off, reply_to_id = self._chunk_reply_routing(chat_id, reply_to, metadata, thread_id, index)
         if private_dm_topic_send and reply_to_id is None and not dm_topic_reply_to_off:
+            # attempt=0 marks a local refusal that never reached the Bot API.
+            TelegramDeliveryReceipt(
+                chat_id=chat_id, attempt=0, reply_anchor=False, thread_id=thread_id).failed()
             return SendResult(success=False, error=self._dm_topic_missing_anchor_error(), retryable=False)
         thread_kwargs = self._thread_kwargs_for_send(
             chat_id, thread_id, metadata, reply_to_message_id=reply_to_id, reply_to_mode=self._reply_to_mode)
@@ -3327,11 +3360,17 @@ class TelegramAdapter(BasePlatformAdapter):
             thread_kwargs["message_thread_id"] = None
         effective_thread_id = thread_kwargs.get("message_thread_id")
         for _send_attempt in range(3):
+            # One receipt per platform attempt. Content-free by construction; `failed()` in the finally
+            # below covers every terminal path (return, retry `continue`, raise) without touching the
+            # retry logic, and no-ops once `succeeded()` has emitted for this attempt.
+            receipt = TelegramDeliveryReceipt(
+                chat_id=chat_id, attempt=_send_attempt + 1, reply_anchor=reply_to_id is not None,
+                thread_id=thread_kwargs.get("message_thread_id") or thread_kwargs.get("direct_messages_topic_id"))
             try:
                 send_kwargs = {
                     "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id, **thread_kwargs,
                     **self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
-                return await self._send_chunk_markdown_or_plain(chunk, send_kwargs), used_thread_fallback
+                msg = await self._send_chunk_markdown_or_plain(chunk, send_kwargs)
             except _NetErr as send_err:
                 # BadRequest subclasses NetworkError in PTB but is permanent; handle specific cases.
                 if _BadReq and isinstance(send_err, _BadReq):
@@ -3411,6 +3450,11 @@ class TelegramAdapter(BasePlatformAdapter):
                         self.name, _send_attempt + 1, safe_send_error)
                     return _flood_cap_result(wait)
                 raise
+            else:
+                receipt.succeeded(getattr(msg, "message_id", None))
+                return msg, used_thread_fallback
+            finally:
+                receipt.failed()
 
     async def _retrigger_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]]) -> None:
         """Re-arm typing after an intermediate send (Telegram clears it when a message lands). Skipped on
@@ -3451,9 +3495,23 @@ class TelegramAdapter(BasePlatformAdapter):
             tracked.add(task)
             task.add_done_callback(tracked.discard)
 
+    @staticmethod
+    def strip_cron_wrapper(content: str) -> str:
+        """Remove scheduler-only framing while preserving ordinary Telegram text."""
+        if not content.startswith("Cronjob Response: "):
+            return content
+        divider = "\n-------------\n\n"
+        footer_prefix = '\n\nTo stop or manage this job, send me a new message (e.g. "stop reminder '
+        divider_pos = content.find(divider)
+        footer_pos = content.rfind(footer_prefix)
+        if divider_pos < 0 or footer_pos <= divider_pos or "\n(job_id: " not in content[:divider_pos]:
+            return content
+        return content[divider_pos + len(divider):footer_pos].strip() or content
+
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send a message to a Telegram chat."""
+        content = self.strip_cron_wrapper(content)
         if not self._bot:
             live = self._replacement_telegram_adapter()
             if live is not None:
@@ -6060,12 +6118,33 @@ class TelegramAdapter(BasePlatformAdapter):
         self._apply_topic_recovery(event)
         return super()._text_batch_key(event)
 
+    async def handle_message(self, event: MessageEvent) -> None:
+        """Carry timing through the inherited background-task handoff without exposing event data."""
+        from gateway.turn_timing import bind_turn_timing
+        timing = getattr(event, "_gateway_turn_timing", None)
+        if timing is None:
+            return await super().handle_message(event)
+        timing.mark("adapter_wait")
+        timing.mark("queue_wait")
+        with bind_turn_timing(timing):
+            return await super().handle_message(event)
+
     def _enqueue_text_event(self, event: MessageEvent) -> None:
         """Buffer a text chunk, or hold it while delayed delivery must be dropped."""
+        from gateway.turn_timing import TurnTiming
+        if getattr(event, "_gateway_turn_timing", None) is None:
+            event._gateway_turn_timing = TurnTiming()
+        event._gateway_turn_timing.mark("telegram_quiet_window")
         if self._should_drop_delayed_delivery():
             self._hold_inbound_event(event, where="text-enqueue")
             return
+        key = self._text_batch_key(event)
+        existing = self._pending_text_batches.get(key)
         super()._enqueue_text_event(event)
+        pending = self._pending_text_batches.get(key)
+        if pending is not None and getattr(pending, "_batch_opened_mono", None) is None:
+            opened = getattr(existing, "_batch_opened_mono", None) if existing is not None else None
+            pending._batch_opened_mono = opened if opened is not None else time.monotonic()
 
     async def _flush_buffered(self, pending: dict, tasks: dict, key: str, delay: float, where: str, log_fn=None) -> None:
         """Shared delayed-flush body: sleep, pop, hold if teardown started, else dispatch. A cancel after
@@ -6099,8 +6178,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 tasks.pop(key, None)
 
     def _text_batch_delay_for(self, pending: Optional[MessageEvent]) -> float:
-        """Adaptive delay: near-split-point last chunk → long delay (continuation almost certain);
-        short/medium totals → capped fast delays; else configured cap (all min()'d with the operator cap)."""
+        """Adaptive delay, or a DM conversational quiet window when extra.conversational_dm_batching is on."""
+        if self._conversational_dm_batching and pending is not None:
+            source = getattr(pending, "source", None)
+            chat_type = getattr(source, "chat_type", "") if source is not None else ""
+            if chat_type in {"dm", "private"}:
+                opened = getattr(pending, "_batch_opened_mono", time.monotonic())
+                elapsed = max(0.0, time.monotonic() - opened)
+                remaining = max(0.0, float(self._text_batch_max_wait_seconds) - elapsed)
+                return min(float(self._text_batch_quiet_seconds), remaining)
         last_len = getattr(pending, "_last_chunk_len", 0) if pending else 0
         total_len = len(getattr(pending, "text", "") or "") if pending else 0
         if last_len >= self._SPLIT_THRESHOLD:
@@ -6666,23 +6752,47 @@ class TelegramAdapter(BasePlatformAdapter):
         over any style (the master switch stays authoritative)."""
         return self._reactions_enabled() and self._reaction_style() == self._RECEIPT_STYLE
 
-    async def _set_reaction(self, chat_id: str, message_id: str, emoji: Optional[str]) -> bool:
-        """Set a single emoji reaction (``None`` clears all bot-set reactions, the documented Bot API way)."""
+    def _build_reaction_receipt(self, chat_id: Any, message_id: Any, emoji: Optional[str],
+                                phase: str) -> Optional[TelegramReactionReceipt]:
+        """Fail-open receipt handle for one reaction attempt; ``None`` when the receipt module
+        cannot build one (receipt bookkeeping must never break the reaction path)."""
+        try:
+            return TelegramReactionReceipt(
+                chat_id=chat_id, message_id=message_id, emoji=emoji, phase=phase)
+        except Exception:
+            return None
+
+    async def _set_reaction(self, chat_id: str, message_id: str, emoji: Optional[str], *,
+                            phase: str = PHASE_DIRECT) -> bool:
+        """Set a single emoji reaction (``None`` clears all bot-set reactions, the documented Bot API way).
+
+        Emits one redacted receipt per attempt (``gateway.telegram_reaction_receipt``): hashed chat
+        and message ids, the emoji (``none`` for a clear), the *phase* the attempt belongs to, and
+        the outcome plus failure class. The receipt carries no message text and never raises.
+        """
+        receipt = self._build_reaction_receipt(chat_id, message_id, emoji, phase)
         if not self._bot:
+            if receipt is not None:
+                receipt.failed(LOCAL_NO_BOT)
             return False
         try:
             await self._bot.set_message_reaction(chat_id=normalize_telegram_chat_id(chat_id), message_id=int(message_id), reaction=emoji)
-            return True
         except Exception as e:
             if emoji is None:
                 logger.debug("[%s] clear reactions failed: %s", self.name, _redact_telegram_error_text(e))
             else:
                 logger.debug("[%s] set_message_reaction failed (%s): %s", self.name, emoji, _redact_telegram_error_text(e))
+            if receipt is not None:
+                receipt.failed(e)
             return False
+        if receipt is not None:
+            receipt.succeeded()
+        return True
 
-    async def _clear_reactions(self, chat_id: str, message_id: str) -> bool:
+    async def _clear_reactions(self, chat_id: str, message_id: str, *,
+                               phase: str = PHASE_DIRECT) -> bool:
         """Clear all bot-set reactions."""
-        return await self._set_reaction(chat_id, message_id, None)
+        return await self._set_reaction(chat_id, message_id, None, phase=phase)
 
     # -- Agent-facing reactions (send_message action="react"): deliberate intents, so NOT gated by the
     # reactions master switch or the lifecycle style (same split as Photon's tapbacks).
@@ -6693,14 +6803,14 @@ class TelegramAdapter(BasePlatformAdapter):
         if not message_id:
             logger.debug("[%s] add_reaction skipped: message_id required", self.name)
             return False
-        return await self._set_reaction(chat_id, message_id, emoji)
+        return await self._set_reaction(chat_id, message_id, emoji, phase=PHASE_DIRECT)
 
     async def remove_reaction(self, chat_id: str, message_id: Optional[str] = None) -> bool:
         """Clear the bot's reactions on ``message_id`` (same wrapper contract as ``add_reaction``)."""
         if not message_id:
             logger.debug("[%s] remove_reaction skipped: message_id required", self.name)
             return False
-        return await self._clear_reactions(chat_id, message_id)
+        return await self._clear_reactions(chat_id, message_id, phase=PHASE_DIRECT)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add an in-progress reaction when message processing begins."""
@@ -6709,7 +6819,7 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
         if chat_id and message_id:
-            await self._set_reaction(chat_id, message_id, "\U0001f440")
+            await self._set_reaction(chat_id, message_id, "\U0001f440", phase=PHASE_START)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Swap the in-progress reaction for a final success/failure reaction (set_message_reaction
@@ -6721,9 +6831,13 @@ class TelegramAdapter(BasePlatformAdapter):
         if not (chat_id and message_id):
             return
         if outcome == ProcessingOutcome.CANCELLED:
-            await self._clear_reactions(chat_id, message_id)
+            await self._clear_reactions(chat_id, message_id, phase=PHASE_CANCELLED)
         else:
-            await self._set_reaction(chat_id, message_id, "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e")
+            await self._set_reaction(
+                chat_id, message_id,
+                "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e",
+                phase=PHASE_COMPLETE,
+            )
 
 
 # -- Plugin registration glue: register(ctx) plus the hook implementations (adapter factory, YAML→env/extra

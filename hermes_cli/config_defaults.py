@@ -2017,6 +2017,15 @@ DEFAULT_CONFIG = {
         # supervisor can't hammer the process. max_starts <= 0 disables. Env escape hatches:
         # HERMES_GATEWAY_MAX_STARTS / HERMES_GATEWAY_START_WINDOW_S.
         "respawn_storm": {"max_starts": 5, "window_seconds": 120},
+        # Telegram DM no-task fast path (LAB-3). When true, a bare ack or greeting in a Telegram
+        # DM gets an advisory note asking the model for one short reply with no tools. The tool
+        # schema stays on the wire (prompt-cache invariant; a misroute degrades to "the model
+        # ignored a hint", never dropped work). False = every DM turn enters the full agentic
+        # loop. Default on. The gateway does not merge DEFAULT_CONFIG, so the reader treats a
+        # missing key as enabled; set false here to disable without a code change.
+        "telegram": {
+            "fast_path": True,
+        },
         # Prefix user messages IN THE MODEL'S CONTEXT with a timestamp (e.g. "[Tue 2026-04-28
         # 13:40:53 CEST]") for temporal awareness. Persisted transcripts stay clean (timestamp is
         # message metadata regardless), so enabling later surfaces past send-times too.

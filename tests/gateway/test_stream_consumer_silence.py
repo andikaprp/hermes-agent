@@ -109,6 +109,51 @@ def _sent_and_edited(adapter):
 
 class TestStreamedSilenceSuppression:
     @pytest.mark.asyncio
+    async def test_response_interrupted_marker_is_not_delivered(self):
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_1",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1),
+        )
+        consumer.on_delta("[response interrupted]")
+        consumer.finish()
+        await consumer.run()
+
+        assert all("[response interrupted]" not in text.casefold() for text in _sent_and_edited(adapter))
+        assert consumer.final_content_delivered is False
+
+    @pytest.mark.asyncio
+    async def test_interrupted_final_response_retracts_existing_marker_preview(self):
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_1",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1),
+        )
+        consumer._message_id = "preview_1"
+        consumer._preview_message_ids = {"preview_1"}
+        consumer._already_sent = True
+        consumer.on_delta("[response interrupted]")
+        consumer.finish("[response interrupted]")
+        await consumer.run()
+
+        adapter.delete_message.assert_awaited_once_with("chat_1", "preview_1")
+        assert consumer.final_content_delivered is False
+
+    @pytest.mark.asyncio
+    async def test_prose_mentioning_interrupted_marker_is_delivered(self):
+        adapter = _make_adapter()
+        consumer = GatewayStreamConsumer(
+            adapter, "chat_1",
+            StreamConsumerConfig(edit_interval=0.01, buffer_threshold=1),
+        )
+        prose = "The log contains [response interrupted], but this is the answer."
+        consumer.on_delta(prose)
+        consumer.finish(prose)
+        await consumer.run()
+
+        assert any(prose in text for text in _sent_and_edited(adapter))
+
+    @pytest.mark.asyncio
     async def test_no_reply_only_stream_is_fully_suppressed(self):
         """A stream whose entire content is NO_REPLY sends nothing visible."""
         adapter = _make_adapter()
