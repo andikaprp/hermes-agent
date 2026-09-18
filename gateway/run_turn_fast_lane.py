@@ -372,25 +372,23 @@ def try_fast_lane(
 
     started = clock()
     provider_label = provider or runtime.get("provider") or "main"
-    # Lane-side affinity: aux `_normalize_main_runtime` drops session_id, and the
-    # gateway turn thread has no ambient conversation contextvar, so call_llm's
-    # shared merge would send no x-opencode-session. Attach it here; caller-pinned
-    # extra_headers win over the later aux setdefault merge.
-    extra_headers: Optional[Dict[str, str]] = None
+    # OpenCode affinity via the same runtime contextvar the main turn uses.
+    # Passing main_runtime down does NOT work: _normalize_main_runtime drops
+    # session_id before the aux header merge, so the lane request went out with
+    # no x-opencode-session and the provider answered 400 MissingSessionID.
     _sid = (runtime.get("session_id") or "").strip() if isinstance(runtime.get("session_id"), str) else ""
+    token = None
     if _sid:
-        from agent.opencode_affinity import merge_opencode_session_headers
+        from agent.auxiliary_client import set_runtime_main
 
-        _hdr_kwargs: Dict[str, Any] = {}
-        merge_opencode_session_headers(
-            _hdr_kwargs,
-            provider or runtime.get("provider"),
-            runtime.get("base_url"),
-            _sid,
+        token = set_runtime_main(
+            provider or runtime.get("provider") or "",
+            model or runtime.get("model") or "",
+            base_url=runtime.get("base_url") or "",
+            api_key=runtime.get("api_key") or "",
+            api_mode=runtime.get("api_mode") or "",
+            session_id=_sid,
         )
-        got = _hdr_kwargs.get("extra_headers")
-        if isinstance(got, dict) and got:
-            extra_headers = got
     try:
         stream = call_llm_fn(
             messages=messages,
@@ -398,13 +396,11 @@ def try_fast_lane(
             max_tokens=256,
             temperature=0.7,
             timeout=call_timeout_s,
-            main_runtime=runtime or None,
             provider=provider or None,
             model=model or None,
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
             api_mode=runtime.get("api_mode"),
-            extra_headers=extra_headers,
         )
     except Exception as exc:
         logger.info("fast_lane call setup failed: %s", type(exc).__name__)
@@ -413,6 +409,14 @@ def try_fast_lane(
             ready_ms=(clock() - started) * 1000.0, fallback=True, chat_id=chat_id,
         )
         return None
+    finally:
+        if token is not None:
+            try:
+                from agent.auxiliary_client import reset_runtime_main
+
+                reset_runtime_main(token)
+            except Exception:
+                pass
 
     # Non-stream shims may return a completed response despite stream=True.
     if _is_completed_response(stream):

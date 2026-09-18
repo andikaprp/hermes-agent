@@ -367,12 +367,17 @@ def test_runner_updates_cached_agent_messages_on_lane_success(monkeypatch):
     assert agent._session_messages == lane_result["messages"]
 
 
-def test_try_fast_lane_carries_opencode_session_affinity():
-    """LAB-52: opencode-go lane must send x-opencode-session (else HTTP 400 MissingSessionID)."""
+def test_try_fast_lane_sets_opencode_session_affinity_contextvar():
+    """LAB-52: opencode-go lane must send x-opencode-session (else HTTP 400
+    MissingSessionID). The lane sets the runtime contextvar with the session id
+    and does NOT pass main_runtime down (aux normalization strips it)."""
     captured: list[dict] = []
 
     def fake_call_llm(**kwargs):
+        from agent.auxiliary_client import _runtime_main_value
+
         captured.append(kwargs)
+        captured.append(_runtime_main_value("session_id"))
         return iter([_chunk("sip")])
 
     result = try_fast_lane(
@@ -389,11 +394,10 @@ def test_try_fast_lane_carries_opencode_session_affinity():
         call_llm_fn=fake_call_llm,
     )
     assert result is not None
-    assert len(captured) == 1
+    assert len(captured) == 2
     kw = captured[0]
-    assert (kw.get("main_runtime") or {}).get("session_id") == "sess-affinity-lab52"
-    headers = kw.get("extra_headers") or {}
-    assert headers.get("x-opencode-session") == "sess-affinity-lab52"
+    assert "main_runtime" not in kw
+    assert captured[1] == "sess-affinity-lab52"
 
 
 def test_runner_passes_session_identity_into_fast_lane_runtime(monkeypatch):
@@ -449,3 +453,40 @@ def test_runner_passes_session_identity_into_fast_lane_runtime(monkeypatch):
     )
     assert seen["main_runtime"].get("session_id") == "sess-affinity-lab52"
     assert seen["main_runtime"].get("provider") == "opencode-go"
+
+
+def test_lane_affinity_via_contextvar_and_no_main_runtime(monkeypatch):
+    """The lane must NOT pass main_runtime down (aux normalizes it away and the
+    request then misses x-opencode-session); it must set the runtime contextvar
+    with the session id instead. Regression for LAB-52 400 MissingSessionID."""
+    from gateway.run_turn_fast_lane import try_fast_lane
+
+    seen: dict = {}
+
+    def fake_call_llm(**kwargs):
+        from agent.auxiliary_client import _runtime_main_value
+
+        seen["passed_main_runtime"] = "main_runtime" in kwargs
+        seen["session_id"] = _runtime_main_value("session_id")
+        raise RuntimeError("stop-here")
+
+    try:
+        try_fast_lane(
+            history=[], user_message="ok",
+            user_config={
+                "gateway": {"telegram": {"fast_lane": {
+                    "enabled": True, "provider": "opencode-go", "model": "glm-5",
+                    "max_messages": 6, "max_chars": 2000, "ttft_budget_ms": 8000,
+                }}}
+            },
+            main_runtime={
+                "provider": "opencode-go", "base_url": "https://opencode.ai/zen/go/v1",
+                "api_mode": "chat_completions", "session_id": "ses-1", "model": "glm-5",
+            },
+            call_llm_fn=fake_call_llm,
+            chat_id="4242",
+        )
+    except RuntimeError:
+        pass
+    assert seen.get("passed_main_runtime") is False
+    assert seen.get("session_id") == "ses-1"
