@@ -372,6 +372,25 @@ def try_fast_lane(
 
     started = clock()
     provider_label = provider or runtime.get("provider") or "main"
+    # Lane-side affinity: aux `_normalize_main_runtime` drops session_id, and the
+    # gateway turn thread has no ambient conversation contextvar, so call_llm's
+    # shared merge would send no x-opencode-session. Attach it here; caller-pinned
+    # extra_headers win over the later aux setdefault merge.
+    extra_headers: Optional[Dict[str, str]] = None
+    _sid = (runtime.get("session_id") or "").strip() if isinstance(runtime.get("session_id"), str) else ""
+    if _sid:
+        from agent.opencode_affinity import merge_opencode_session_headers
+
+        _hdr_kwargs: Dict[str, Any] = {}
+        merge_opencode_session_headers(
+            _hdr_kwargs,
+            provider or runtime.get("provider"),
+            runtime.get("base_url"),
+            _sid,
+        )
+        got = _hdr_kwargs.get("extra_headers")
+        if isinstance(got, dict) and got:
+            extra_headers = got
     try:
         stream = call_llm_fn(
             messages=messages,
@@ -385,6 +404,7 @@ def try_fast_lane(
             api_key=runtime.get("api_key"),
             base_url=runtime.get("base_url"),
             api_mode=runtime.get("api_mode"),
+            extra_headers=extra_headers,
         )
     except Exception as exc:
         logger.info("fast_lane call setup failed: %s", type(exc).__name__)
