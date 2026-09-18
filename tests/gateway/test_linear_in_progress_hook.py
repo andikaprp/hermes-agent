@@ -11,29 +11,33 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from gateway.builtin_hooks import linear_in_progress as mod
 from gateway.hooks import HookRegistry
 
-CANNED_PAYLOAD = {
-    "data": {
-        "team": {
-            "issues": {
-                "nodes": [
-                    {"identifier": "LAB-48", "title": "Stop em/en dashes reaching Telegram"},
-                    {"identifier": "LAB-49", "title": "Voice channel UX polish"},
-                    {"identifier": "LAB-50", "title": "Quarterly report"},
-                    {"identifier": "LAB-51", "title": "Docs refresh"},
-                    {"identifier": "LAB-52", "title": "Bot onboarding flow"},
-                    {"identifier": "PROJ-53", "title": "Different team: must be filtered out"},
-                ]
-            }
+_CANNED_ISSUES = [
+    {"id": "LAB-48", "title": "Stop em/en dashes reaching Telegram"},
+    {"id": "LAB-49", "title": "Voice channel UX polish"},
+    {"id": "LAB-50", "title": "Quarterly report"},
+    {"id": "LAB-51", "title": "Docs refresh"},
+    {"id": "LAB-52", "title": "Bot onboarding flow"},
+    {"id": "PROJ-53", "title": "Different team: must be filtered out"},
+]
+
+
+def _canned_mcp_result(issues=None):
+    """An MCP ``tools/call`` result shaped like the Linear server's ``list_issues``."""
+    return {
+        "result": {
+            "content": [{"type": "text", "text": json.dumps({"issues": issues or _CANNED_ISSUES})}]
         }
     }
-}
+
+
+def _fake_mcp_call(*args, **kwargs):
+    return _canned_mcp_result()
 
 
 @pytest.fixture(autouse=True)
@@ -54,20 +58,34 @@ def _token_file(home: Path) -> Path:
     return path
 
 
-def test_parse_in_progress_filters_by_team_prefix_and_cleans_titles():
-    rows = mod.parse_in_progress(CANNED_PAYLOAD)
+def test_fetch_in_progress_calls_list_issues_with_the_team_state_filter(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        mod, "_mcp_call",
+        lambda token, tool, arguments, timeout: (calls.append((tool, arguments)) or _fake_mcp_call()),
+    )
+
+    rows = mod.fetch_in_progress("tok")
+
+    assert calls[0][0] == "list_issues"
+    assert calls[0][1] == {"state": "started", "team": "Labs", "limit": 6}
+    assert ("LAB-48", "Stop em/en dashes reaching Telegram") in rows
+
+
+def test_parse_mcp_issues_filters_by_team_prefix_and_cleans_titles():
+    rows = mod.parse_mcp_issues(_canned_mcp_result())
 
     assert ("LAB-48", "Stop em/en dashes reaching Telegram") in rows
     assert all(identifier.startswith("LAB-") for identifier, _ in rows)
     assert len(rows) == 5  # PROJ-53 is filtered out by the team identifier prefix
 
 
-def test_parse_in_progress_survives_malformed_payloads():
-    assert mod.parse_in_progress(None) == []
-    assert mod.parse_in_progress({"data": None}) == []
-    assert mod.parse_in_progress({"data": {"team": None}}) == []
-    assert mod.parse_in_progress({"data": {"team": {"issues": None}}}) == []
-    assert mod.parse_in_progress({"data": {"team": {"issues": {"nodes": [None, {}, {"identifier": 3}]}}}}) == []
+def test_parse_mcp_issues_survives_malformed_payloads():
+    assert mod.parse_mcp_issues(None) == []
+    assert mod.parse_mcp_issues({"result": {}}) == []
+    assert mod.parse_mcp_issues({"result": {"content": []}}) == []
+    assert mod.parse_mcp_issues({"result": {"content": [{"type": "text", "text": "not json"}]}}) == []
+    assert mod.parse_mcp_issues({"result": {"content": [{"type": "text", "text": json.dumps({"issues": [None, {}, {"id": 3}]})}]}}) == []
 
 
 def test_build_note_caps_at_five_and_marks_extra():
@@ -88,7 +106,7 @@ def test_build_note_returns_none_for_empty():
 def test_handle_returns_note_with_token_and_fetch(tmp_path, monkeypatch):
     _token_file(tmp_path)
     monkeypatch.setattr(mod, "_read_cached_access_token", lambda home: "tok")
-    monkeypatch.setattr(mod, "_request_graphql", lambda *a, **k: CANNED_PAYLOAD)
+    monkeypatch.setattr(mod, "_mcp_call", _fake_mcp_call)
     monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: tmp_path)
 
     note = asyncio.run(mod.handle("agent:start", {}))
@@ -112,7 +130,7 @@ def test_handle_fails_closed_on_fetch_error(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(mod, "_request_graphql", boom)
+    monkeypatch.setattr(mod, "_mcp_call", boom)
     monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: tmp_path)
 
     assert asyncio.run(mod.handle("agent:start", {})) is None
@@ -128,7 +146,7 @@ def test_handle_ignores_other_events(tmp_path, monkeypatch):
 def test_builtin_hook_is_registered_for_agent_start(tmp_path, monkeypatch):
     _token_file(tmp_path)
     monkeypatch.setattr(mod, "_read_cached_access_token", lambda home: "tok")
-    monkeypatch.setattr(mod, "_request_graphql", lambda *a, **k: CANNED_PAYLOAD)
+    monkeypatch.setattr(mod, "_mcp_call", _fake_mcp_call)
     monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: tmp_path)
 
     registry = HookRegistry()
