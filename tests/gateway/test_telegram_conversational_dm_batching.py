@@ -22,6 +22,8 @@ def _adapter():
     adapter._TEXT_BATCH_SHORT_LEN = 400
     adapter._TEXT_BATCH_FAST_DELAY_S = 0.18
     adapter._TEXT_BATCH_SHORT_DELAY_S = 0.24
+    # Isolate quiet-window math from the LAB-52 early-flush bypass.
+    adapter._fast_lane_quiet_bypass = False
     adapter.handle_message = AsyncMock()
     return adapter
 

@@ -1,0 +1,6 @@
+2026-09-18 23:50:01,180 INFO [20260918_235001_aaa111] agent.turn_context: conversation turn: session=20260918_235001_aaa111 model=llama3.2:1b provider=ollama platform=telegram history=4 msg='[Thu 2026-09-18 23:49:59 WIB] ok'
+2026-09-18 23:50:02,900 INFO [20260918_235001_aaa111] agent.conversation_loop: API call #1: model=llama3.2:1b provider=ollama in=120 out=8 total=128 latency=1.2s
+2026-09-19 08:15:00,120 INFO [20260919_081500_bbb222] agent.turn_context: conversation turn: session=20260919_081500_bbb222 model=llama3.2:1b provider=ollama platform=telegram history=6 msg='[Fri 2026-09-19 08:14:58 WIB] hi'
+2026-09-19 08:15:00,600 INFO [20260919_081500_bbb222] agent.conversation_loop: API call #1: model=llama3.2:1b provider=ollama in=90 out=5 total=95 latency=0.4s
+2026-09-19 09:00:10,280 INFO [20260919_090010_ccc333] agent.turn_context: conversation turn: session=20260919_090010_ccc333 model=llama3.2:1b provider=ollama platform=telegram history=8 msg='[Fri 2026-09-19 09:00:08 WIB] hello'
+2026-09-19 09:00:11,800 INFO [20260919_090010_ccc333] agent.conversation_loop: API call #1: model=llama3.2:1b provider=ollama in=110 out=10 total=120 latency=1.3s
