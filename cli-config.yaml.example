@@ -676,6 +676,19 @@ compression:
   # cut back; the guarantee wins over the budget by design.
   min_tail_user_messages: 1
 
+  # Optional TypeSafe Jev keep-priority scorer (default: false). When enabled and
+  # TYPESAFE_API_KEY is set in .env, the compressor scores the compressible
+  # middle window with Jev before the existing summarizer runs. Fan-out batches
+  # (~40 messages/request) ask one score question per index (0=drop, 1=background,
+  # 2=must-keep). keep_threshold 1.2 keeps background+. Any Jev error, timeout,
+  # 429, or missing key falls back to the unchanged compression path.
+  # jev_scorer:
+  #   enabled: false
+  #   keep_threshold: 1.2
+  #   batch_size: 40
+  #   model: jev-latest
+  #   timeout_seconds: 30
+
   # Compression retry rounds before a turn gives up with "max compression
   # attempts reached" (default: 3, same as the previous hardcoded value).
   # Raise (e.g. 6) for tool-schema-heavy sessions where 3 rounds cannot bring
