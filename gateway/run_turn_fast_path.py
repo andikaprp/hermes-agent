@@ -250,12 +250,19 @@ def _strip_leading_message_timestamp(text: str) -> str:
         return text
 
 
-def classify_fast_path(
+# Soft miss after shape checks: lexicon has no hit. Optional Jev second opinion may
+# promote these to the lane when ``gateway.telegram.jev_routing`` is enabled.
+FAST_PATH_UNCERTAIN = "uncertain"
+
+
+def classify_fast_path_band(
     message: Any, *, history: Optional[Sequence[Any]] = None,
 ) -> Optional[str]:
-    """Return ``"social"`` / ``"ack"`` when this turn needs no tools, else ``None``.
+    """Return ``"social"`` / ``"ack"`` / ``"uncertain"``, or ``None`` for a hard reject.
 
-    ``history`` is the conversation the agent is about to see, newest last.
+    ``None`` means clearly not lane-eligible (URL, action verb, directive, ack-as-go-ahead,
+    …). ``"uncertain"`` means the message survived every shape check but missed the frozen
+    lexicon — the optional Jev routing layer may second-guess those only.
     """
     if not isinstance(message, str):
         return None  # native multimodal content
@@ -287,21 +294,58 @@ def classify_fast_path(
         return None if _assistant_proposed(history) else "ack"
     if is_trivial_prompt(stripped) or is_trivial_prompt(phrase):
         return "social"
+    return FAST_PATH_UNCERTAIN
+
+
+def classify_fast_path(
+    message: Any, *, history: Optional[Sequence[Any]] = None,
+) -> Optional[str]:
+    """Return ``"social"`` / ``"ack"`` when this turn needs no tools, else ``None``.
+
+    ``history`` is the conversation the agent is about to see, newest last.
+    Preserves the pre-Jev contract: uncertain soft-misses still map to ``None``.
+    """
+    band = classify_fast_path_band(message, history=history)
+    if band in ("ack", "social"):
+        return band
     return None
+
+
+def needs_jev_second_opinion(
+    message: Any, *, history: Optional[Sequence[Any]] = None,
+) -> bool:
+    """True only in the declared uncertain band (shape-ok, lexicon miss)."""
+    return classify_fast_path_band(message, history=history) == FAST_PATH_UNCERTAIN
 
 
 def fast_path_reason(
     message: Any, *, platform_key: Optional[str], chat_type: Optional[str],
     history: Optional[Sequence[Any]] = None, user_config: Any = None,
+    chat_id: Any = None,
 ) -> Optional[str]:
-    """``classify_fast_path`` restricted to the surfaces the fast path is enabled on."""
+    """``classify_fast_path`` restricted to the surfaces the fast path is enabled on.
+
+    When the deterministic classifier lands in the uncertain band and
+    ``gateway.telegram.jev_routing`` is enabled with a key, optionally asks Jev for a
+    confidence-gated lane/task decision. Disabled / missing key / any failure keeps
+    today's behavior (``None`` for uncertain).
+    """
     if not is_fast_path_enabled(user_config):
         return None
     if str(platform_key or "").lower() not in FAST_PATH_PLATFORMS:
         return None
     if str(chat_type or "").lower() not in _DM_CHAT_TYPES:
         return None
-    return classify_fast_path(message, history=history)
+    band = classify_fast_path_band(message, history=history)
+    if band in ("ack", "social"):
+        return band
+    if band != FAST_PATH_UNCERTAIN:
+        return None
+    from gateway.run_turn_jev_routing import maybe_jev_route_uncertain
+
+    return maybe_jev_route_uncertain(
+        message, history=history, user_config=user_config, chat_id=chat_id,
+    )
 
 
 def apply_fast_path_note(message: str, reason: str, *, chat_id: Any = None) -> str:

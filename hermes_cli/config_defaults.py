@@ -2051,6 +2051,16 @@ DEFAULT_CONFIG = {
                 "max_chars": 2000,
                 "ttft_budget_ms": 8000,
             },
+            # Optional TypeSafe Jev second opinion for uncertain fast-path turns
+            # (default OFF). When enabled AND TYPESAFE_API_KEY is set, only the
+            # classifier's uncertain band calls Jev; confidence below threshold /
+            # any failure keeps today's deterministic routing.
+            "jev_routing": {
+                "enabled": False,
+                "threshold": 0.85,
+                "model": "jev-latest",
+                "timeout_seconds": 30,
+            },
         },
         # Prefix user messages IN THE MODEL'S CONTEXT with a timestamp (e.g. "[Tue 2026-04-28
         # 13:40:53 CEST]") for temporal awareness. Persisted transcripts stay clean (timestamp is
@@ -2639,7 +2649,8 @@ OPTIONAL_ENV_VARS = {
     # ── Tool API keys ──
     "TYPESAFE_API_KEY": _tool(
         "TypeSafe API key for optional Jev keep-priority scoring during context compression "
-        "(compression.jev_scorer.enabled)",
+        "(compression.jev_scorer.enabled) and optional gateway fast-path Jev routing "
+        "(gateway.telegram.jev_routing.enabled)",
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
