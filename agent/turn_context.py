@@ -952,6 +952,9 @@ def build_turn_context(
 
     # System prompt is cached per session for prefix caching.
     if agent._cached_system_prompt is None:
+        # Session-setup only: optional Jev skill routing reads the first inbound
+        # task before the auto-load skill set is committed (never mid-conversation).
+        agent._skill_route_task = original_user_message
         restore_or_build_system_prompt(agent, system_message, conversation_history)
     active_system_prompt = agent._cached_system_prompt
 

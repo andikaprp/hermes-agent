@@ -254,6 +254,16 @@ DEFAULT_CONFIG = {
         # timeout_s <= 0 disables; poll_s = sampling interval. Invalid values (NaN, Inf,
         # non-positive poll) warn and fall back to defaults. See agent/turn_liveness.py.
         "turn_liveness": {"timeout_s": 600.0, "poll_s": 15.0},
+        # Optional TypeSafe Jev skill selection at session setup (default OFF). When enabled AND
+        # TYPESAFE_API_KEY is set, a Choice over top candidate skills may replace skills.auto_load
+        # before the session skill set is committed. Confidence below threshold / any failure /
+        # missing key keeps today's auto_load behavior. Never mid-conversation (prompt-cache safe).
+        "skill_routing": {
+            "enabled": False,
+            "threshold": 0.85,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+        },
     },
 
     "terminal": {
@@ -2660,8 +2670,9 @@ OPTIONAL_ENV_VARS = {
     "TYPESAFE_API_KEY": _tool(
         "TypeSafe API key for optional Jev keep-priority scoring during context compression "
         "(compression.jev_scorer.enabled), optional gateway fast-path Jev routing "
-        "(gateway.telegram.jev_routing.enabled), and the optional pre-spawn delegation gate "
-        "(delegation.jev_check)",
+        "(gateway.telegram.jev_routing.enabled), the optional pre-spawn delegation gate "
+        "(delegation.jev_check), and optional session-setup skill selection "
+        "(agent.skill_routing.enabled)",
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
