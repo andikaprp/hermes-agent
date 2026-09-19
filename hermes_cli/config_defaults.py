@@ -2031,6 +2031,17 @@ DEFAULT_CONFIG = {
         # supervisor can't hammer the process. max_starts <= 0 disables. Env escape hatches:
         # HERMES_GATEWAY_MAX_STARTS / HERMES_GATEWAY_START_WINDOW_S.
         "respawn_storm": {"max_starts": 5, "window_seconds": 120},
+        # Inbound safety screen (TypeSafe Jev noul). When enabled and TYPESAFE_API_KEY is set,
+        # messaging turns ask Jev whether the inbound text is harmful / a hijack attempt before
+        # the agent runs. noul >= threshold -> plain refusal, no agent loop. Default OFF; any
+        # Jev failure falls through. Threshold 0.75 requires a clear harmful signal (near-0.5
+        # uncertainty never blocks).
+        "safety": {
+            "enabled": False,
+            "threshold": 0.75,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+        },
         # Telegram DM no-task fast path (LAB-3). When true, a bare ack or greeting in a Telegram
         # DM gets an advisory note asking the model for one short reply with no tools. The tool
         # schema stays on the wire (prompt-cache invariant; a misroute degrades to "the model

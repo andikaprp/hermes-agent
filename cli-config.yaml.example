@@ -1277,6 +1277,16 @@ gateway:
   # isn't running). Explicit per-platform vars like DISCORD_PROXY still apply.
   # trust_env: true
 
+  # Inbound safety screen (TypeSafe Jev). When enabled and TYPESAFE_API_KEY is
+  # set in .env, messaging turns ask Jev whether the inbound text is harmful or
+  # a hijack attempt before the agent runs. Default OFF. Failures never block.
+  # Threshold 0.75: clear harmful signal required; uncertain (~0.5) never blocks.
+  # safety:
+  #   enabled: false
+  #   threshold: 0.75
+  #   model: jev-latest
+  #   timeout_seconds: 30
+
 # =============================================================================
 # Toolsets
 # =============================================================================

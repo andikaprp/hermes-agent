@@ -1905,6 +1905,15 @@ class TurnRunner:
         # *subprocess* exports HERMES_SESSION_KEY (from its own --session-key argv, a separate process) — so
         # removing this in-process gateway write does not affect any of them.
         platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
+        # Optional Jev inbound safety screen: before agent resolution / cache touch.
+        # Blocked turns return a plain refusal; failures fall through (never break a turn).
+        from gateway.run_turn_safety_guard import try_safety_guard_block
+        blocked = try_safety_guard_block(
+            message=ctx.message, source=ctx.source, user_config=ctx.user_config,
+        )
+        if blocked is not None:
+            ctx.timing.log_terminal()
+            return blocked
         combined_ephemeral = self._combined_ephemeral_prompt()
         max_iterations = _current_max_iterations()
         try:
