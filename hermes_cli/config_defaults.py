@@ -1252,6 +1252,17 @@ DEFAULT_CONFIG = {
         # External memory provider plugin (empty = built-in only); only ONE at a time: "openviking",
         # "mem0", "hindsight", "holographic", "retaindb", "byterover".
         "provider": "",
+        # Optional TypeSafe Jev noul triage before durable memory ``add`` (default OFF).
+        # When enabled AND TYPESAFE_API_KEY is set, proposed entry text is scored; below
+        # threshold skips the write. Any failure / missing key / short pre-filter writes as today.
+        "jev_triage": {
+            "enabled": False,
+            "threshold": 0.75,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+            # Skip the ~0.5–1s Jev call for short entries (hot path stays cheap).
+            "min_chars": 40,
+        },
     },
     # Subagent delegation — override the provider:model used by delegate_task so children run on a
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
@@ -2671,8 +2682,9 @@ OPTIONAL_ENV_VARS = {
         "TypeSafe API key for optional Jev keep-priority scoring during context compression "
         "(compression.jev_scorer.enabled), optional gateway fast-path Jev routing "
         "(gateway.telegram.jev_routing.enabled), the optional pre-spawn delegation gate "
-        "(delegation.jev_check), and optional session-setup skill selection "
-        "(agent.skill_routing.enabled)",
+        "(delegation.jev_check), optional session-setup skill selection "
+        "(agent.skill_routing.enabled), and optional durable-memory noul triage "
+        "(memory.jev_triage.enabled)",
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),

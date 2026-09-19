@@ -746,7 +746,12 @@ class MemoryManager:
                 result = json.loads(result)
             except Exception:
                 return False
-        return isinstance(result, dict) and result.get("success") is True and result.get("staged") is not True
+        return (
+            isinstance(result, dict)
+            and result.get("success") is True
+            and result.get("staged") is not True
+            and result.get("skipped") is not True
+        )
 
     def notify_memory_tool_write(self, tool_result: Any, tool_args: Dict[str, Any], *,
                                  build_metadata: Optional[Callable[[], Dict[str, Any]]] = None) -> None:
