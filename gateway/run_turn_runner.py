@@ -1617,6 +1617,7 @@ class TurnRunner:
             ctx.message, platform_key=platform_key,
             chat_type=getattr(source, "chat_type", None), history=agent_history,
             user_config=ctx.user_config,
+            chat_id=getattr(source, "chat_id", None),
         )
 
     def _try_fast_lane_or_conversation(
