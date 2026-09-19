@@ -149,6 +149,8 @@ def load_fast_lane_config(user_config: Any = None) -> Dict[str, Any]:
         "enabled": True,
         "provider": "",
         "model": "",
+        "base_url": "",
+        "api_key": "",
         "max_messages": _DEFAULT_MAX_MESSAGES,
         "max_chars": _DEFAULT_MAX_CHARS,
         "ttft_budget_ms": _DEFAULT_TTFT_MS,
@@ -165,7 +167,7 @@ def load_fast_lane_config(user_config: Any = None) -> Dict[str, Any]:
                 cfg["enabled"] = value.strip().lower() not in {"false", "0", "no", "off"}
             else:
                 cfg["enabled"] = bool(value)
-        for key in ("provider", "model"):
+        for key in ("provider", "model", "base_url", "api_key"):
             if key in raw and raw[key] is not None:
                 cfg[key] = str(raw[key]).strip()
         for key, cast in (
@@ -353,7 +355,7 @@ def try_fast_lane(
     runtime = dict(main_runtime or {})
     provider = (cfg.get("provider") or runtime.get("provider") or "").strip()
     model = (cfg.get("model") or runtime.get("model") or "").strip()
-    if not provider and not model and not runtime.get("api_key"):
+    if not provider and not model and not (cfg.get("api_key") or runtime.get("api_key")):
         log_fast_lane(provider="none", ttft_ms=None, ready_ms=None, fallback=True, chat_id=chat_id)
         return None
 
@@ -384,8 +386,8 @@ def try_fast_lane(
         token = set_runtime_main(
             provider or runtime.get("provider") or "",
             model or runtime.get("model") or "",
-            base_url=runtime.get("base_url") or "",
-            api_key=runtime.get("api_key") or "",
+            base_url=cfg.get("base_url") or runtime.get("base_url") or "",
+            api_key=cfg.get("api_key") or runtime.get("api_key") or "",
             api_mode=runtime.get("api_mode") or "",
             session_id=_sid,
         )
@@ -398,8 +400,8 @@ def try_fast_lane(
             timeout=call_timeout_s,
             provider=provider or None,
             model=model or None,
-            api_key=runtime.get("api_key"),
-            base_url=runtime.get("base_url"),
+            api_key=cfg.get("api_key") or runtime.get("api_key"),
+            base_url=cfg.get("base_url") or runtime.get("base_url"),
             api_mode=runtime.get("api_mode"),
         )
     except Exception as exc:
