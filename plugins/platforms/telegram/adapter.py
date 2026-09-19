@@ -443,6 +443,8 @@ class TelegramAdapter(BasePlatformAdapter):
     _conversational_dm_batching: bool = False
     _text_batch_quiet_seconds: float = 2.0
     _text_batch_max_wait_seconds: float = 5.0
+    # None = consult gateway.telegram.fast_lane at call time (default on). Explicit bool for tests.
+    _fast_lane_quiet_bypass: Optional[bool] = None
 
     @staticmethod
     def _env_float_clamped(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
@@ -6140,11 +6142,46 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         key = self._text_batch_key(event)
         existing = self._pending_text_batches.get(key)
+        prior_bubbles = int(getattr(existing, "_batch_bubble_count", 0) or 0) if existing is not None else 0
         super()._enqueue_text_event(event)
         pending = self._pending_text_batches.get(key)
-        if pending is not None and getattr(pending, "_batch_opened_mono", None) is None:
-            opened = getattr(existing, "_batch_opened_mono", None) if existing is not None else None
-            pending._batch_opened_mono = opened if opened is not None else time.monotonic()
+        if pending is not None:
+            if getattr(pending, "_batch_opened_mono", None) is None:
+                opened = getattr(existing, "_batch_opened_mono", None) if existing is not None else None
+                pending._batch_opened_mono = opened if opened is not None else time.monotonic()
+            pending._batch_bubble_count = prior_bubbles + 1
+
+    def _lane_quiet_bypass_enabled(self) -> bool:
+        """Reuse the LAB-52 fast-lane gate; never raise into the flush task."""
+        override = getattr(self, "_fast_lane_quiet_bypass", None)
+        if override is not None:
+            return bool(override)
+        try:
+            from hermes_cli.config import load_config_readonly
+            from gateway.run_turn_fast_lane import is_fast_lane_enabled
+
+            return bool(is_fast_lane_enabled(load_config_readonly()))
+        except Exception:
+            return True
+
+    def _should_skip_dm_quiet_window(self, pending: Optional[MessageEvent]) -> bool:
+        """Single lane-eligible DM bubble: flush now (skip text_batch_quiet_seconds).
+
+        Reuses ``classify_fast_path`` (never raises). Multi-bubble bursts and non-eligible
+        text keep the full quiet window. Gated on ``gateway.telegram.fast_lane``.
+        """
+        try:
+            if pending is None:
+                return False
+            if int(getattr(pending, "_batch_bubble_count", 1) or 1) > 1:
+                return False
+            if not self._lane_quiet_bypass_enabled():
+                return False
+            from gateway.run_turn_fast_path import classify_fast_path
+
+            return classify_fast_path(getattr(pending, "text", None) or "") is not None
+        except Exception:
+            return False
 
     async def _flush_buffered(self, pending: dict, tasks: dict, key: str, delay: float, where: str, log_fn=None) -> None:
         """Shared delayed-flush body: sleep, pop, hold if teardown started, else dispatch. A cancel after
@@ -6183,6 +6220,8 @@ class TelegramAdapter(BasePlatformAdapter):
             source = getattr(pending, "source", None)
             chat_type = getattr(source, "chat_type", "") if source is not None else ""
             if chat_type in {"dm", "private"}:
+                if self._should_skip_dm_quiet_window(pending):
+                    return 0.0
                 opened = getattr(pending, "_batch_opened_mono", time.monotonic())
                 elapsed = max(0.0, time.monotonic() - opened)
                 remaining = max(0.0, float(self._text_batch_max_wait_seconds) - elapsed)

@@ -1,0 +1,12 @@
+2026-09-18 23:50:01,100 INFO hermes_plugins.telegram_platform.adapter: [Telegram] Flushing text batch agent:main:telegram:dm:redactedchat (2 chars)
+2026-09-18 23:50:01,150 INFO gateway.run: inbound message: platform=telegram user=redacteduser chat=redactedchat
+2026-09-18 23:50:03,200 INFO gateway.telegram_delivery_receipt: telegram_delivery_receipt mono=1000.1 chat=redactedchat attempt=1 mid=1001 anchor=none thread=none outcome=sent
+2026-09-18 23:50:03,500 INFO gateway.run: response ready: platform=telegram chat=redactedchat session=agent:main:telegram:dm:redactedchat time=2.4s api_calls=1 response=12 chars
+2026-09-19 08:15:00,050 INFO hermes_plugins.telegram_platform.adapter: [Telegram] Flushing text batch agent:main:telegram:dm:redactedchat (2 chars)
+2026-09-19 08:15:00,100 INFO gateway.run: inbound message: platform=telegram user=redacteduser chat=redactedchat
+2026-09-19 08:15:00,800 INFO gateway.telegram_delivery_receipt: telegram_delivery_receipt mono=2000.2 chat=redactedchat attempt=1 mid=2002 anchor=none thread=none outcome=sent
+2026-09-19 08:15:01,000 INFO gateway.run: response ready: platform=telegram chat=redactedchat session=agent:main:telegram:dm:redactedchat time=0.9s api_calls=1 response=8 chars
+2026-09-19 09:00:10,200 INFO plugins.platforms.telegram.adapter: [Telegram] Flushing text batch agent:main:telegram:dm:redactedchat (5 chars)
+2026-09-19 09:00:10,250 INFO gateway.run: inbound message: platform=telegram user=redacteduser chat=redactedchat
+2026-09-19 09:00:12,100 INFO gateway.telegram_delivery_receipt: telegram_delivery_receipt mono=3000.3 chat=redactedchat attempt=1 mid=3003 anchor=none thread=none outcome=sent
+2026-09-19 09:00:12,400 INFO gateway.run: response ready: platform=telegram chat=redactedchat session=agent:main:telegram:dm:redactedchat time=2.2s api_calls=1 response=20 chars

@@ -50,6 +50,16 @@ Usage
   python3 telegram_latency_samples.py --gateway-log /workspace/hermes/logs/gateway.log \\
                                      --agent-log  /workspace/hermes/logs/agent.log
 
+Date / rotation notes
+---------------------
+``--date YYYY-MM-DD`` (default: today) keeps turns whose *response-ready*
+log stamp falls on that calendar day. A single ``gateway.log`` may span two
+calendar days after rotation; the filter is on the turn, not the file.
+Explicit ``--gateway-log`` / ``--agent-log`` paths also pull rotated
+``*.log.N`` siblings from the same directory so a day that already rolled
+off the head file is still visible. Quiet window needs the day present in
+*both* gateway and agent logs (independent rotation).
+
 Re-run after more live Telegram traffic (no restart needed; logs are appended live):
   python3 /home/rancana/.hermes/hermes-agent/scripts/telegram_latency_samples.py \\
       --date $(date +%F) --json-out /workspace/projects/telegram-delivery-verification/lab3-live-latency.json
@@ -72,7 +82,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 DEFAULT_LOG_DIR = os.environ.get("HERMES_LOG_DIR", "/workspace/hermes/logs")
 
 
-def _discover(name: str) -> List[str]:
+def _discover(name: str, log_dir: Optional[str] = None) -> List[str]:
     """``gateway.log`` plus rotated ``gateway.log.N`` siblings, newest first.
 
     Rotation is independent per file (gateway.log.N can cover a different day than
@@ -80,12 +90,41 @@ def _discover(name: str) -> List[str]:
     contain that day. Per-day coverage in the JSON makes that visible instead of
     silently averaging over days that lack one side of the pair.
     """
-    base = os.path.join(DEFAULT_LOG_DIR, name)
+    root = log_dir if log_dir is not None else DEFAULT_LOG_DIR
+    base = os.path.join(root, name)
     out = [base] if os.path.exists(base) else []
-    for suffix in sorted(os.listdir(DEFAULT_LOG_DIR) if os.path.isdir(DEFAULT_LOG_DIR) else [],
+    for suffix in sorted(os.listdir(root) if os.path.isdir(root) else [],
                          key=lambda s: (len(s), s)):
         if suffix.startswith(name + ".") and suffix[len(name) + 1:].isdigit():
-            out.append(os.path.join(DEFAULT_LOG_DIR, suffix))
+            out.append(os.path.join(root, suffix))
+    return out
+
+
+def expand_log_paths(paths: Iterable[str]) -> List[str]:
+    """Keep explicit paths and add rotated ``name.N`` siblings from the same directory.
+
+    Passing only ``gateway.log`` must still see a day that already rolled into
+    ``gateway.log.1``. Dedupes while preserving discovery order (head file first).
+    """
+    seen: set[str] = set()
+    out: List[str] = []
+    for raw in paths:
+        path = os.path.abspath(raw)
+        if path not in seen:
+            seen.add(path)
+            out.append(path)
+        directory, name = os.path.dirname(path), os.path.basename(path)
+        # Strip an existing .N suffix so gateway.log.1 still expands siblings of gateway.log.
+        base_name = name
+        if "." in name:
+            stem, maybe_n = name.rsplit(".", 1)
+            if maybe_n.isdigit():
+                base_name = stem
+        for sibling in _discover(base_name, log_dir=directory):
+            abs_sib = os.path.abspath(sibling)
+            if abs_sib not in seen:
+                seen.add(abs_sib)
+                out.append(abs_sib)
     return out
 
 
@@ -100,7 +139,11 @@ RE_FLUSH = re.compile(r"Flushing text batch (\S+) \((\d+) chars\)")
 RE_INBOUND = re.compile(r"inbound message: platform=(\S+) user=(\S+) chat=(\S+)")
 RE_RECEIPT = re.compile(
     r"mono=([\d.]+) chat=(\S+) attempt=(\d+) mid=(\S+) anchor=(\S+) thread=(\S+) outcome=(\S+)")
-RE_READY = re.compile(r"response ready: platform=(\S+) chat=(\S+) time=([\d.]+)s api_calls=(\d+) response=(\d+)")
+# gateway/run_turn.py emits ``session=<key>`` between chat and time (since #6214769).
+# Older rotated lines omit it; accept both so a multi-day head file + .N siblings all parse.
+RE_READY = re.compile(
+    r"response ready: platform=(\S+) chat=(\S+)(?:\s+session=\S+)? "
+    r"time=([\d.]+)s api_calls=(\d+) response=(\d+)")
 RE_WATCH = re.compile(r"Watch pattern notification . injecting for (\S+) chat=(\S+)")
 RE_SEND_RESPONSE = re.compile(r"\[(Telegram|Slack|Inline)\] Sending response \((\d+) chars\) to (\S+)")
 RE_SUPPRESS = re.compile(r"Suppressing normal final send for session (\S+)")
@@ -684,7 +727,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--gateway-log", action="append", default=None, help="gateway log path (repeatable)")
     ap.add_argument("--agent-log", action="append", default=None, help="agent log path (repeatable)")
     ap.add_argument("--config", default=DEFAULT_CONFIG, help="config.yaml for the quiet window")
-    ap.add_argument("--date", default=None, help="only turns ending on this YYYY-MM-DD (default: all dates in the logs)")
+    ap.add_argument(
+        "--date", default=None,
+        help="only turns ending on this YYYY-MM-DD (default: today; use --all-dates for every day)",
+    )
     ap.add_argument("--all-dates", action="store_true", help="keep every day found in the logs")
     ap.add_argument("--json-out", default=None, help="write the raw samples + aggregates as JSON")
     ap.add_argument("--md-out", default=None, help="write generated markdown tables")
@@ -692,11 +738,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--label", default=None, help="free-text label stored in the JSON provenance")
     args = ap.parse_args(argv)
 
-    gateway_paths = args.gateway_log or DEFAULT_GATEWAY
-    agent_paths = args.agent_log or DEFAULT_AGENT
+    gateway_paths = expand_log_paths(args.gateway_log or DEFAULT_GATEWAY)
+    agent_paths = expand_log_paths(args.agent_log or DEFAULT_AGENT)
     if not any(os.path.exists(p) for p in gateway_paths):
         print(f"no readable gateway log in {gateway_paths}", file=sys.stderr)
         return 2
+
+    date_filter = None if args.all_dates else (args.date or _dt.date.today().isoformat())
 
     window = configured_quiet_window(args.config)
     scan = scan_logs(gateway_paths, agent_paths)
@@ -720,8 +768,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             window["source"] = "assumed_defaults(config_unreadable,no_gaps)"
 
     measured = [measure_turn(t, window["quiet_seconds"], window["max_wait_seconds"]) for t in turns]
-    if args.date and not args.all_dates:
-        measured = [s for s in measured if s["date"] == args.date]
+    if date_filter is not None:
+        measured = [s for s in measured if s["date"] == date_filter]
+    if not measured:
+        print(
+            f"no telegram turns for date={date_filter} "
+            f"(parsed {len(turns)} turn(s) spanning other days; try --all-dates)",
+            file=sys.stderr,
+        )
+        return 2
     measured.sort(key=lambda s: s["ready_ts"])
 
     # empirical quiet-window evidence (p10..p90 of the clean gaps)
@@ -761,7 +816,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "agent_logs": agent_paths,
             "config": window,
             "platform": args.platform,
-            "date_filter": args.date if not args.all_dates else None,
+            "date_filter": date_filter,
             "label": args.label,
             "sent_any_message": False,
             "modified_any_service": False,
