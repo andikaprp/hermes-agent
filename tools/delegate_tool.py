@@ -483,6 +483,19 @@ def delegate_task(
     if err:
         return tool_error(err)
 
+    # Optional Jev pre-spawn gate (delegation.jev_check; OFF by default). High-confidence
+    # "do_directly" skips the spawn; disabled / timeout / failure keeps today's spawn path.
+    from tools.delegate_tool_jev import (
+        evaluate_jev_delegate_gate,
+        skipped_spawn_payload,
+    )
+    _jev_decision = evaluate_jev_delegate_gate(
+        task_list, context=context, raw_config=cfg.get("jev_check"),
+    )
+    if not _jev_decision.spawn:
+        import json as _json
+        return _json.dumps(skipped_spawn_payload(_jev_decision, task_list), ensure_ascii=False)
+
     overall_start = time.monotonic()
     # Live transcripts: cache/delegation/live/<id>/task-<n>.log per task, a side channel with zero effect on message
     # content or prompt caching. Best-effort: on failure live_paths is empty and delegation proceeds.
