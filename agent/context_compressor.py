@@ -2301,11 +2301,16 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
-        custom_providers: list | None = None,
+        custom_providers: list | None = None, jev_scorer: Any = None,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
         self.tail_mode = tail_mode if tail_mode in ("legacy", "lean") else "lean"
+        from agent.context_compressor_jev import JevScorerConfig, parse_jev_scorer_config
+        if isinstance(jev_scorer, JevScorerConfig):
+            self.jev_scorer = jev_scorer
+        else:
+            self.jev_scorer = parse_jev_scorer_config(jev_scorer)
         # Per-model context_length overrides live in custom_providers; without them deferred
         # resolution falls back to the hardcoded family catalog (#83324).
         self.custom_providers = custom_providers or None
@@ -4623,6 +4628,19 @@ Write only the summary body. Do not include any preamble or prefix."""
         self._reset_proactive_prune_rearm()
         return compressed
 
+    def _maybe_jev_thin_window(self, turns_to_summarize: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Optionally thin the compressible window with Jev; identity when disabled/fallback.
+
+        Dropped spans become one-line stubs so Phase 3's existing compression summarizer
+        still sees them (never a silent delete). Jev itself cannot write text.
+        """
+        cfg = getattr(self, "jev_scorer", None)
+        if cfg is None or not getattr(cfg, "enabled", False):
+            return turns_to_summarize
+        from agent.context_compressor_jev import thin_compressible_window
+
+        return thin_compressible_window(turns_to_summarize, cfg=cfg).messages
+
     def compress(
         self, messages: List[Dict[str, Any]], current_tokens: Optional[int] = None, focus_topic: Optional[str] = None,
         force: bool = False, memory_context: str = "", bypass_cooldown: bool = False,
@@ -4693,6 +4711,10 @@ Write only the summary body. Do not include any preamble or prefix."""
             self._log_compression_start(
                 display_tokens, compress_start, compress_end, len(turns_to_summarize), n_messages - scan.tail_start,
             )
+
+        # Optional Jev keep-priority thin (default OFF). On any failure the original
+        # turns_to_summarize is kept and Phase 3 proceeds unchanged.
+        turns_to_summarize = self._maybe_jev_thin_window(turns_to_summarize)
 
         # Phase 3: Generate structured summary (or skip the LLM when the middle is too small to matter)
         feasibility_skip = not force and self._feasibility_skip(telemetry, turns_to_summarize, compress_start, compress_end)

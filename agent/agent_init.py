@@ -1505,7 +1505,15 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
         codex_responses_native=responses_native,
         codex_responses_compact_threshold=compact_threshold,
         idle_compact_after_seconds=idle_compact_after_seconds,
+        jev_scorer=_parse_jev_scorer_config(cfg),
     )
+
+
+def _parse_jev_scorer_config(cfg: Dict[str, Any]):
+    """Parse ``compression.jev_scorer``; defaults match DEFAULT_CONFIG (disabled)."""
+    from agent.context_compressor_jev import parse_jev_scorer_config
+
+    return parse_jev_scorer_config(_cfg_dict(cfg, "jev_scorer"))
 
 
 def _warn_invalid_config_int(
@@ -1855,6 +1863,7 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             proactive_prune_min_reclaim_tokens=cs.proactive_prune_min_reclaim,
             min_tail_user_messages=cs.min_tail_users, tail_mode=cs.tail_mode,
             custom_providers=_custom_providers,
+            jev_scorer=getattr(cs, "jev_scorer", None),
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):

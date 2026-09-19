@@ -638,6 +638,20 @@ DEFAULT_CONFIG = {
         # already at/below threshold × target_ratio; honors the same cooldown/ anti-thrash/lock
         # guards. Example: 1800 = 30 min.
         "idle_compact_after_seconds": 0,
+        # Optional TypeSafe Jev keep-priority scorer (default OFF). When enabled AND
+        # TYPESAFE_API_KEY is set in .env, the compressor scores the compressible middle
+        # window with Jev before the existing summarizer runs. Any Jev error / timeout /
+        # 429 / missing key falls back to the unchanged compression path.
+        "jev_scorer": {
+            "enabled": False,
+            # Keep messages with score >= this (0=drop, 1=background, 2=must-keep).
+            # 1.2 keeps background+; only clearly-droppable spans are demoted.
+            "keep_threshold": 1.2,
+            # Fan-out batch size (state array + one score question per index).
+            "batch_size": 40,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+        },
     },
     # Anthropic prompt caching (Claude via OpenRouter or native API). cache_ttl: "5m" | "1h"; other
     # non-falsy values are ignored; falsy (false, null, "off", "disabled", "no", "none") disables
@@ -2623,6 +2637,10 @@ OPTIONAL_ENV_VARS = {
         "Azure Foundry base URL (set via 'hermes model' for endpoint-specific config)",
         "Azure Foundry base URL", None, password=False),
     # ── Tool API keys ──
+    "TYPESAFE_API_KEY": _tool(
+        "TypeSafe API key for optional Jev keep-priority scoring during context compression "
+        "(compression.jev_scorer.enabled)",
+        "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
     "PARALLEL_API_KEY": _tool("Parallel API key for AI-native web search and extract",
