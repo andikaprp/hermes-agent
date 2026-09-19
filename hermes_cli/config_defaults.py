@@ -1306,6 +1306,16 @@ DEFAULT_CONFIG = {
         # notifications to the PARENT; false suppresses them (the child's result is the
         # deliverable). Async-delegation results are NEVER suppressed.
         "surface_child_process_notifications": False,
+        # Optional TypeSafe Jev gate before spawn (default OFF). When enabled AND
+        # TYPESAFE_API_KEY is set, System One answers "delegate" vs "do_directly" for the
+        # pending task description. High-confidence "do_directly" skips the spawn; below
+        # threshold / timeout / any failure keeps today's spawn path.
+        "jev_check": {
+            "enabled": False,
+            "threshold": 0.8,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+        },
     },
     # Ephemeral prefill messages file — JSON list of {role, content} dicts injected at the start of
     # every API call for few-shot priming. Never saved to sessions/logs/trajectories.
@@ -2649,8 +2659,9 @@ OPTIONAL_ENV_VARS = {
     # ── Tool API keys ──
     "TYPESAFE_API_KEY": _tool(
         "TypeSafe API key for optional Jev keep-priority scoring during context compression "
-        "(compression.jev_scorer.enabled) and optional gateway fast-path Jev routing "
-        "(gateway.telegram.jev_routing.enabled)",
+        "(compression.jev_scorer.enabled), optional gateway fast-path Jev routing "
+        "(gateway.telegram.jev_routing.enabled), and the optional pre-spawn delegation gate "
+        "(delegation.jev_check)",
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
