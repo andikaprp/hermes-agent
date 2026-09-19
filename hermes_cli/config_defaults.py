@@ -2081,6 +2081,15 @@ DEFAULT_CONFIG = {
                 "max_messages": 6,
                 "max_chars": 2000,
                 "ttft_budget_ms": 8000,
+                # Optional TypeSafe Jev check on the lane DRAFT before send
+                # (default OFF). Fail-open: missing key / timeout / errors send
+                # the draft; only a confident escalate falls back to the one-hop path.
+                "quality_gate": {
+                    "enabled": False,
+                    "threshold": 0.7,
+                    "model": "jev-latest",
+                    "timeout_seconds": 1.5,
+                },
             },
             # Optional TypeSafe Jev second opinion for uncertain fast-path turns
             # (default OFF). When enabled AND TYPESAFE_API_KEY is set, only the

@@ -344,6 +344,54 @@ def _lane_user_message(history, user_message, model) -> Any:
     return user_message
 
 
+
+def _apply_quality_gate_or_success(
+    history,
+    user_message: str,
+    text: str,
+    *,
+    user_config,
+    chat_id,
+    on_delta,
+    gate_enabled: bool,
+    deltas_already_emitted: bool,
+    provider_label: str,
+    ttft_ms,
+    ready_ms,
+) -> Optional[Dict[str, Any]]:
+    """Quality-gate the lane draft (if enabled), then emit + return success or None.
+
+    ``deltas_already_emitted`` is True when ``on_delta`` already ran during streaming
+    (gate off). When the gate is on, streaming is buffered and we emit only after a
+    fail-open / confident ``send``. Escalation returns ``None`` with no emit.
+    """
+    if gate_enabled:
+        from gateway.run_turn_fast_lane_quality_gate import evaluate_fast_lane_draft
+
+        decision = evaluate_fast_lane_draft(
+            user_message,
+            text,
+            user_config=user_config,
+            chat_id=chat_id,
+        )
+        if decision == "escalate":
+            log_fast_lane(
+                provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
+                fallback=True, chat_id=chat_id,
+            )
+            return None
+
+    if on_delta is not None and not deltas_already_emitted:
+        on_delta(text)
+
+    log_fast_lane(
+        provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
+        fallback=False, chat_id=chat_id,
+    )
+    return _success_result(history, user_message, text)
+
+
+
 def try_fast_lane(
     *,
     history: Optional[Sequence[Any]],
@@ -364,6 +412,13 @@ def try_fast_lane(
     cfg = load_fast_lane_config(user_config)
     if not cfg.get("enabled", True):
         return None
+
+    from gateway.run_turn_fast_lane_quality_gate import load_quality_gate_config
+
+    gate_cfg = load_quality_gate_config(user_config)
+    gate_enabled = bool(gate_cfg.enabled)
+    # Buffer deltas when the gate may discard the draft (avoid leaking a bad reply).
+    stream_delta = None if gate_enabled else on_delta
 
     runtime = dict(main_runtime or {})
     provider = (cfg.get("provider") or runtime.get("provider") or "").strip()
@@ -447,18 +502,18 @@ def try_fast_lane(
                 fallback=True, chat_id=chat_id,
             )
             return None
-        if on_delta is not None:
-            on_delta(text)
-        log_fast_lane(
-            provider=provider_label, ttft_ms=ready_ms, ready_ms=ready_ms,
-            fallback=False, chat_id=chat_id,
+        return _apply_quality_gate_or_success(
+            history, user_message, text,
+            user_config=user_config, chat_id=chat_id, on_delta=on_delta,
+            gate_enabled=gate_enabled, deltas_already_emitted=False,
+            provider_label=provider_label,
+            ttft_ms=ready_ms, ready_ms=ready_ms,
         )
-        return _success_result(history, user_message, text)
 
     text, ttft_ms, err = _consume_stream_with_ttft(
         stream,
         ttft_budget_ms=ttft_budget_ms,
-        on_delta=on_delta,
+        on_delta=stream_delta,
         started_at=started,
         clock=clock,
     )
@@ -472,11 +527,13 @@ def try_fast_lane(
 
     text = sanitize_fast_lane_reply(text) or _strip_em_dashes(text).strip() or "…"
 
-    log_fast_lane(
-        provider=provider_label, ttft_ms=ttft_ms, ready_ms=ready_ms,
-        fallback=False, chat_id=chat_id,
+    return _apply_quality_gate_or_success(
+        history, user_message, text,
+        user_config=user_config, chat_id=chat_id, on_delta=on_delta,
+        gate_enabled=gate_enabled, deltas_already_emitted=not gate_enabled,
+        provider_label=provider_label,
+        ttft_ms=ttft_ms, ready_ms=ready_ms,
     )
-    return _success_result(history, user_message, text)
 
 
 def _success_result(
