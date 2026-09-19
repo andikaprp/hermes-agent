@@ -331,6 +331,19 @@ def _is_completed_response(obj: Any) -> bool:
     return getattr(obj, "choices", None) is not None and not hasattr(obj, "__next__")
 
 
+def _lane_user_message(history, user_message, model) -> Any:
+    """Qwen3 models default to a thinking preamble (streams thinking tokens before
+    the first content delta), which blows the fast-lane TTFT budget. Tell them to
+    answer directly; harmless no-op for other models."""
+    try:
+        if "qwen" in (model or "").lower():
+            text = user_message if isinstance(user_message, str) else str(user_message or "")
+            return "/no_think\n" + text
+    except Exception:
+        pass
+    return user_message
+
+
 def try_fast_lane(
     *,
     history: Optional[Sequence[Any]],
@@ -361,7 +374,7 @@ def try_fast_lane(
 
     messages = build_compact_transcript(
         history,
-        user_message,
+        _lane_user_message(history, user_message, model),
         max_messages=int(cfg.get("max_messages") or _DEFAULT_MAX_MESSAGES),
         max_chars=int(cfg.get("max_chars") or _DEFAULT_MAX_CHARS),
     )
