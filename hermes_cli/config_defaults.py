@@ -1264,6 +1264,21 @@ DEFAULT_CONFIG = {
             "min_chars": 40,
         },
     },
+    # Optional TypeSafe Jev PR review triage (default OFF). When enabled AND TYPESAFE_API_KEY
+    # is set, grades review comment sets + diff metadata into approve / request-changes /
+    # needs-human with confidence. Below-threshold confidence always becomes needs-human
+    # (never auto-approves). Posts at most one commentary comment per PR; never submits
+    # GitHub APPROVE — the human review gate stays.
+    "code_review": {
+        "jev_triage": {
+            "enabled": False,
+            "threshold": 0.85,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+            # Bound the raw diff excerpt in Jev state (hashes/metadata carry the rest).
+            "max_diff_chars": 12000,
+        },
+    },
     # Subagent delegation — override the provider:model used by delegate_task so children run on a
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
     # every configured provider is supported.
@@ -2699,8 +2714,9 @@ OPTIONAL_ENV_VARS = {
         "(compression.jev_scorer.enabled), optional gateway fast-path Jev routing "
         "(gateway.telegram.jev_routing.enabled), the optional pre-spawn delegation gate "
         "(delegation.jev_check), optional session-setup skill selection "
-        "(agent.skill_routing.enabled), and optional durable-memory noul triage "
-        "(memory.jev_triage.enabled)",
+        "(agent.skill_routing.enabled), optional durable-memory noul triage "
+        "(memory.jev_triage.enabled), and optional PR review triage "
+        "(code_review.jev_triage.enabled)",
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
