@@ -152,7 +152,11 @@ def _idle_compaction(
     _idle_after = getattr(agent, "compression_idle_compact_after_seconds", 0)
     if not (agent.compression_enabled and _idle_after > 0 and messages):
         return
-    _idle_gap = time.time() - getattr(agent, "_last_activity_ts", time.time())
+    # Prefer the pre-stamp base: DurableTurnLease.start stamps activity right before compaction.
+    _idle_base = getattr(agent, "_turn_start_idle_base_ts", None) or getattr(
+        agent, "_last_activity_ts", time.time()
+    )
+    _idle_gap = time.time() - _idle_base
     if _idle_gap < _idle_after:
         return
     _compressor = agent.context_compressor

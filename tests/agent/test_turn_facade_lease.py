@@ -125,3 +125,28 @@ def test_interrupt_turn_only_while_active():
     assert calls == ["lost"] and lease.interrupt_message == "lost"
     lease.deactivate_after_liveness_abort()
     assert lease.stop.is_set() and lease.is_turn_active() is False
+
+
+def test_start_preserves_idle_base_before_activity_stamp(monkeypatch):
+    """Idle compaction must see the pre-stamp activity clock, not the turn-entry stamp."""
+    import time
+
+    monkeypatch.setattr(
+        "agent.turn_liveness.resolve_turn_liveness_settings", lambda cfg: (None, 1.0)
+    )
+    monkeypatch.setattr("agent.periodic_scheduler.schedule", lambda *a, **k: SimpleNamespace(cancel=lambda **kw: None))
+
+    agent = _agent(_Db())
+    old_ts = 1_700_000_000.0
+    agent._last_activity_ts = old_ts
+
+    def _touch(_reason=None):
+        agent._last_activity_ts = time.time()
+
+    agent._touch_activity = _touch
+    lease = DurableTurnLease(agent, agent._session_db, "s1", "h")
+    lease.start()
+    assert agent._turn_start_idle_base_ts == old_ts
+    assert agent._last_activity_ts != old_ts
+    lease.stop_refresher()
+    lease.join_threads()
