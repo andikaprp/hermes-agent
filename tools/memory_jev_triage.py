@@ -19,6 +19,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
+from agent.jev_payload_hygiene import content_hash, mask_state_text
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +99,9 @@ def build_jev_memory_triage_request(
     target: str = "memory",
     model: str = DEFAULT_JEV_MODEL,
 ) -> dict:
-    """System One noul request over the proposed entry text."""
+    """System One noul request over a redacted/truncated proposed entry."""
     label = "user profile" if target == "user" else "memory"
-    text = (entry_text or "").strip()
+    text = mask_state_text(entry_text or "", limit=480)
     return {
         "model": model,
         "state": [
@@ -143,6 +144,8 @@ def log_jev_memory_triage(
     reason: str = "",
     model: str = "",
     fallback: bool = False,
+    content_hash_value: str = "",
+    latency_ms: Optional[float] = None,
 ) -> None:
     payload = {
         "marker": JEV_MEMORY_TRIAGE_MARKER,
@@ -152,6 +155,8 @@ def log_jev_memory_triage(
         "model": model or "",
         "fallback": bool(fallback),
         "reason": reason or "",
+        "content_hash": content_hash_value or "",
+        "latency_ms": None if latency_ms is None else round(float(latency_ms), 1),
     }
     logger.info(
         "[latency] "
@@ -165,6 +170,21 @@ def log_jev_memory_triage(
         payload["reason"] or "ok",
         extra={"jev_memory_triage": payload},
     )
+    try:
+        from gateway.jev_observability import record_jev_decision
+
+        record_jev_decision(
+            kind="memory_triage",
+            tier="skip" if skipped else "keep",
+            model=model,
+            confidence=noul,
+            latency_ms=latency_ms,
+            reason=reason or "ok",
+            content_hash_value=content_hash_value,
+            fallback=fallback,
+        )
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -205,6 +225,7 @@ def triage_memory_add(
     text = (content or "").strip()
     if not should_triage_entry(text, resolved):
         return JevMemoryTriageResult(allow_write=True, reason="prefilter_short")
+    entry_hash = content_hash(text)
     key = (api_key if api_key is not None else resolve_typesafe_api_key()).strip()
     if not key:
         log_jev_memory_triage(
@@ -214,11 +235,13 @@ def triage_memory_add(
             reason="missing_key",
             model=resolved.model,
             fallback=True,
+            content_hash_value=entry_hash,
         )
         return JevMemoryTriageResult(allow_write=True, fallback=True, reason="missing_key")
+    ready_ms = None
     try:
         body = build_jev_memory_triage_request(text, target=target, model=resolved.model)
-        data, _ttft_ms, _ready_ms = _post_systemone(
+        data, _ttft_ms, ready_ms = _post_systemone(
             body,
             api_key=key,
             timeout_seconds=resolved.timeout_seconds,
@@ -239,6 +262,8 @@ def triage_memory_add(
             reason=reason,
             model=resolved.model,
             fallback=True,
+            content_hash_value=entry_hash,
+            latency_ms=ready_ms,
         )
         return JevMemoryTriageResult(allow_write=True, fallback=True, reason=reason)
 
@@ -250,6 +275,8 @@ def triage_memory_add(
             reason="",
             model=resolved.model,
             fallback=False,
+            content_hash_value=entry_hash,
+            latency_ms=ready_ms,
         )
         return JevMemoryTriageResult(allow_write=True, noul=noul, reason="above_threshold")
 
@@ -260,6 +287,8 @@ def triage_memory_add(
         reason="below_threshold",
         model=resolved.model,
         fallback=False,
+        content_hash_value=entry_hash,
+        latency_ms=ready_ms,
     )
     return JevMemoryTriageResult(
         allow_write=False,

@@ -529,6 +529,14 @@ export const api = {
     if (params.component && params.component !== "all") qs.set("component", params.component);
     return fetchJSON<LogsResponse>(`/api/logs?${qs.toString()}`);
   },
+  getJevDecisions: (limit = 200, profile = getManagementProfile()) =>
+    fetchJSON<{
+      mode: string;
+      enabled: boolean;
+      limit: number;
+      decisions: Array<Record<string, unknown>>;
+      path: string;
+    }>(appendProfileParam(`/api/jev/decisions?limit=${limit}`, profile)),
   getAnalytics: (days: number, profile = getManagementProfile()) =>
     fetchJSON<AnalyticsResponse>(
       appendProfileParam(`/api/analytics/usage?days=${days}`, profile),

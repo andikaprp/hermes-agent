@@ -115,6 +115,7 @@ def log_jev_scorer(
     ready_ms: Optional[float],
     fallback: bool,
     reason: str = "",
+    model: str = "",
 ) -> None:
     """Single measurable line; mirrors ``gateway/run_turn_fast_lane.log_fast_lane`` style."""
     payload = {
@@ -125,6 +126,7 @@ def log_jev_scorer(
         "ready_ms": None if ready_ms is None else round(float(ready_ms), 1),
         "fallback": bool(fallback),
         "reason": reason or "",
+        "model": model or "",
     }
     logger.info(
         "[latency] "
@@ -138,6 +140,23 @@ def log_jev_scorer(
         payload["reason"] or "ok",
         extra={"jev_scorer": payload},
     )
+    try:
+        from gateway.jev_observability import record_jev_decision
+
+        record_jev_decision(
+            kind="scorer",
+            tier=f"kept={n_kept}",
+            model=model,
+            confidence=None,
+            latency_ms=ready_ms,
+            reason=reason or "ok",
+            content_hash_value="",
+            n_scored=n_scored,
+            n_kept=n_kept,
+            fallback=fallback,
+        )
+    except Exception:
+        pass
 
 
 def _content_as_text(content: Any) -> str:
@@ -168,6 +187,8 @@ def _content_as_text(content: Any) -> str:
 
 def message_to_state_text(msg: Dict[str, Any]) -> str:
     """Flatten one OpenAI-shaped message into a single text state entry for Jev."""
+    from agent.jev_payload_hygiene import mask_state_text, tool_result_metadata
+
     role = str(msg.get("role") or "unknown")
     text = _content_as_text(msg.get("content")).strip()
     if role == "assistant" and msg.get("tool_calls"):
@@ -191,8 +212,8 @@ def message_to_state_text(msg: Dict[str, Any]) -> str:
         text = f"{text}\n[tool_calls: {call_block}]".strip() if text else f"[tool_calls: {call_block}]"
     if role == "tool":
         tid = msg.get("tool_call_id") or ""
-        return f"[tool {tid}] {text}".strip()
-    return f"[{role}] {text}".strip()
+        return tool_result_metadata(text, tool_call_id=str(tid))
+    return f"[{role}] {mask_state_text(text, limit=2000)}".strip()
 
 
 def _question_for_index(index: int) -> Dict[str, Any]:

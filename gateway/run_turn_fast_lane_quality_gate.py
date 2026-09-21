@@ -20,6 +20,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
+from agent.jev_payload_hygiene import content_hash, mask_state_text
 from gateway.telegram_delivery_receipt import CHAT_DIGEST_PREFIX, redacted_token
 
 logger = logging.getLogger("gateway.run_turn")
@@ -91,11 +92,8 @@ def load_quality_gate_config(user_config: Any = None) -> FastLaneQualityGateConf
 
 
 def _redact_lane_text(text: str, *, limit: int = _STATE_REDACT_CHARS) -> str:
-    """Truncate lane context so long content is not sent to Jev."""
-    cleaned = (text or "").strip().replace("\n", " ")
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[: max(0, limit - 1)].rstrip() + "…"
+    """Truncate + secret-redact lane context so raw dumps are not sent to Jev."""
+    return mask_state_text(text, limit=limit)
 
 
 def build_quality_gate_request(
@@ -157,6 +155,7 @@ def log_quality_gate(
     ready_ms: Optional[float] = None,
     chat_id: Any = None,
     reason: str = "",
+    content_hash_value: str = "",
 ) -> None:
     payload = {
         "marker": QUALITY_GATE_MARKER,
@@ -167,6 +166,7 @@ def log_quality_gate(
         "threshold": float(threshold),
         "ready_ms": None if ready_ms is None else round(float(ready_ms), 1),
         "reason": reason or "",
+        "content_hash": content_hash_value or "",
     }
     logger.info(
         "[latency] "
@@ -183,6 +183,20 @@ def log_quality_gate(
         payload["reason"] or "ok",
         extra={"fast_lane_quality_gate": payload},
     )
+    try:
+        from gateway.jev_observability import record_jev_decision
+
+        record_jev_decision(
+            kind="quality_gate",
+            tier=decision or choice,
+            model=model,
+            confidence=confidence,
+            latency_ms=ready_ms,
+            reason=reason or "ok",
+            content_hash_value=content_hash_value,
+        )
+    except Exception:
+        pass
 
 
 def evaluate_fast_lane_draft(
@@ -205,6 +219,7 @@ def evaluate_fast_lane_draft(
     if not gate.enabled:
         return "send"
 
+    msg_hash = content_hash(f"{user_message or ''}\n{draft_reply or ''}")
     key = (api_key if api_key is not None else resolve_typesafe_api_key()).strip()
     if not key:
         log_quality_gate(
@@ -213,6 +228,7 @@ def evaluate_fast_lane_draft(
             threshold=gate.threshold,
             chat_id=chat_id,
             reason="missing_key",
+            content_hash_value=msg_hash,
         )
         return "send"
 
@@ -223,6 +239,7 @@ def evaluate_fast_lane_draft(
             threshold=gate.threshold,
             chat_id=chat_id,
             reason="empty_draft",
+            content_hash_value=msg_hash,
         )
         return "send"
 
@@ -245,6 +262,7 @@ def evaluate_fast_lane_draft(
                 ready_ms=ready_ms,
                 chat_id=chat_id,
                 reason="over_budget",
+                content_hash_value=msg_hash,
             )
             return "send"
         choice, confidence = parse_quality_answer(data)
@@ -263,6 +281,7 @@ def evaluate_fast_lane_draft(
             threshold=gate.threshold,
             chat_id=chat_id,
             reason=reason,
+            content_hash_value=msg_hash,
         )
         return "send"
 
@@ -279,5 +298,6 @@ def evaluate_fast_lane_draft(
         ready_ms=ready_ms,
         chat_id=chat_id,
         reason="" if clear_escalate or choice == "send" else "below_threshold",
+        content_hash_value=msg_hash,
     )
     return decision
