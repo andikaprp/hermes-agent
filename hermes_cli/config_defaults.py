@@ -2102,6 +2102,13 @@ DEFAULT_CONFIG = {
                 "timeout_seconds": 30,
             },
         },
+        # LAB-59: local Jev decision observability (default OFF). shadow/on append
+        # metadata-only rows to <hermes_home>/logs/jev-decisions.jsonl for the
+        # dashboard/export; nothing is sent off-box. off = no recording.
+        "jev_observability": {
+            "mode": "off",  # off | shadow | on
+            "limit": 200,
+        },
         # Prefix user messages IN THE MODEL'S CONTEXT with a timestamp (e.g. "[Tue 2026-04-28
         # 13:40:53 CEST]") for temporal awareness. Persisted transcripts stay clean (timestamp is
         # message metadata regardless), so enabling later surfaces past send-times too.

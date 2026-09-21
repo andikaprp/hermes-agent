@@ -19,7 +19,6 @@ import pytest
 from agent.context_compressor import ContextCompressor
 from agent.context_compressor_jev import (
     STATE_PLUS_QUESTION_BUDGET_CHARS,
-    TRUNCATE_INDICATOR,
     JevScorerConfig,
     apply_keep_policy,
     build_fanout_request,
@@ -65,7 +64,10 @@ class TestJevFanoutRequestBuilder:
         state_chars = sum(len(s) for s in body["state"])
         longest_q = max(len(json.dumps(q)) for q in body["questions"].values())
         assert state_chars + longest_q <= STATE_PLUS_QUESTION_BUDGET_CHARS
-        assert TRUNCATE_INDICATOR in body["state"][1]
+        # Tool results are hash/metadata only (LAB-59 payload hygiene) — never the dump.
+        assert "TOOLDUMP-" not in body["state"][1]
+        assert "hash=" in body["state"][1]
+        assert "chars=" in body["state"][1]
         assert len(body["state"]) == 3  # never drop entries
 
 

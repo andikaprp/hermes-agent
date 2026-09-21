@@ -83,6 +83,7 @@ const EnvPage = lazy(() => import("@/pages/EnvPage"));
 const FilesPage = lazy(() => import("@/pages/FilesPage"));
 const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
 const LogsPage = lazy(() => import("@/pages/LogsPage"));
+const JevPage = lazy(() => import("@/pages/JevPage"));
 const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
 const ModelsPage = lazy(() => import("@/pages/ModelsPage"));
 const CronPage = lazy(() => import("@/pages/CronPage"));
@@ -161,6 +162,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/analytics": AnalyticsPage,
   "/models": ModelsPage,
   "/logs": LogsPage,
+  "/jev": JevPage,
   "/cron": CronPage,
   "/skills": SkillsPage,
   "/plugins": PluginsPage,
@@ -205,6 +207,7 @@ const BUILTIN_NAV_REST: NavItem[] = [
     icon: Cpu,
   },
   { path: "/logs", labelKey: "logs", label: "Logs", icon: FileText },
+  { path: "/jev", label: "Jev", icon: Activity },
   { path: "/cron", labelKey: "cron", label: "Cron", icon: Clock },
   { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
   { path: "/plugins", labelKey: "plugins", label: "Plugins", icon: Puzzle },

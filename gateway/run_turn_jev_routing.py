@@ -19,6 +19,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
+from agent.jev_payload_hygiene import content_hash, mask_state_text
 from gateway.run_turn_fast_path import _ACK_WORDS, _DIRECTIVE_WORDS
 from gateway.telegram_delivery_receipt import CHAT_DIGEST_PREFIX, redacted_token
 
@@ -98,8 +99,8 @@ def _lexicon_state_context() -> str:
 
 
 def build_jev_routing_request(message: str, *, model: str = DEFAULT_JEV_MODEL) -> dict:
-    """System One choice request: message + lexicon context as state."""
-    text = (message or "").strip()
+    """System One choice request: redacted/truncated message + lexicon context as state."""
+    text = mask_state_text(message or "", limit=280)
     return {
         "model": model,
         "state": [
@@ -147,6 +148,8 @@ def log_jev_routing(
     chat_id: Any = None,
     fallback: bool = False,
     reason: str = "",
+    latency_ms: Optional[float] = None,
+    content_hash_value: str = "",
 ) -> None:
     payload = {
         "marker": JEV_ROUTING_MARKER,
@@ -158,12 +161,14 @@ def log_jev_routing(
         "took_jev": bool(took_jev),
         "fallback": bool(fallback),
         "reason": reason or "",
+        "latency_ms": None if latency_ms is None else round(float(latency_ms), 1),
+        "content_hash": content_hash_value or "",
     }
     logger.info(
         "[latency] "
         + JEV_ROUTING_MARKER
         + " chat=%s state=%s model=%s choice=%s confidence=%s threshold=%s "
-        "took_jev=%s fallback=%s reason=%s",
+        "took_jev=%s fallback=%s reason=%s latency_ms=%s",
         redacted_token(chat_id, prefix=CHAT_DIGEST_PREFIX),
         payload["state"],
         payload["model"],
@@ -173,8 +178,25 @@ def log_jev_routing(
         "true" if took_jev else "false",
         "true" if fallback else "false",
         payload["reason"] or "ok",
+        payload["latency_ms"] if payload["latency_ms"] is not None else "none",
         extra={"jev_routing": payload},
     )
+    try:
+        from gateway.jev_observability import record_jev_decision
+
+        record_jev_decision(
+            kind="routing",
+            tier=choice or state,
+            model=model,
+            confidence=confidence,
+            latency_ms=latency_ms,
+            reason=reason or ("ok" if took_jev else "fallback"),
+            content_hash_value=content_hash_value,
+            took_jev=took_jev,
+            fallback=fallback,
+        )
+    except Exception:
+        pass
 
 
 def maybe_jev_route_uncertain(
@@ -195,6 +217,7 @@ def maybe_jev_route_uncertain(
     cfg = load_jev_routing_config(user_config)
     if not cfg.enabled:
         return None
+    msg_hash = content_hash(message) if isinstance(message, str) else ""
     key = (api_key if api_key is not None else resolve_typesafe_api_key()).strip()
     if not key:
         log_jev_routing(
@@ -207,6 +230,7 @@ def maybe_jev_route_uncertain(
             chat_id=chat_id,
             fallback=True,
             reason="missing_key",
+            content_hash_value=msg_hash,
         )
         return None
     if not isinstance(message, str) or not message.strip():
@@ -220,11 +244,13 @@ def maybe_jev_route_uncertain(
             chat_id=chat_id,
             fallback=True,
             reason="empty_message",
+            content_hash_value=msg_hash,
         )
         return None
+    ready_ms: Optional[float] = None
     try:
         body = build_jev_routing_request(message, model=cfg.model)
-        data, _ttft_ms, _ready_ms = _post_systemone(
+        data, _ttft_ms, ready_ms = _post_systemone(
             body,
             api_key=key,
             timeout_seconds=cfg.timeout_seconds,
@@ -249,6 +275,8 @@ def maybe_jev_route_uncertain(
             chat_id=chat_id,
             fallback=True,
             reason=reason,
+            latency_ms=ready_ms,
+            content_hash_value=msg_hash,
         )
         return None
 
@@ -263,6 +291,8 @@ def maybe_jev_route_uncertain(
         chat_id=chat_id,
         fallback=not took,
         reason="" if took else "below_threshold",
+        latency_ms=ready_ms,
+        content_hash_value=msg_hash,
     )
     if took and choice == "lane":
         return "social"

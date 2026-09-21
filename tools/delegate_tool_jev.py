@@ -20,6 +20,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
+from agent.jev_payload_hygiene import mask_state_text
 
 logger = logging.getLogger(__name__)
 
@@ -108,15 +109,15 @@ def task_hash_for(task_list: Sequence[Dict[str, Any]], context: Optional[str] = 
 
 
 def build_task_state(task_list: Sequence[Dict[str, Any]], context: Optional[str] = None) -> str:
-    """Flatten the pending delegation into one state string for System One."""
+    """Flatten the pending delegation into one redacted state string for System One."""
     lines: List[str] = []
     if context:
-        lines.append(f"Shared context: {context}")
+        lines.append(f"Shared context: {mask_state_text(str(context), limit=400)}")
     for i, task in enumerate(task_list):
         if not isinstance(task, dict):
             continue
-        goal = str(task.get("goal") or "").strip()
-        tctx = str(task.get("context") or "").strip()
+        goal = mask_state_text(str(task.get("goal") or "").strip(), limit=280)
+        tctx = mask_state_text(str(task.get("context") or "").strip(), limit=280)
         block = f"Task {i + 1}: {goal}" if goal else f"Task {i + 1}:"
         if tctx:
             block = f"{block}\nTask context: {tctx}"
@@ -169,6 +170,8 @@ def log_jev_delegate(
     override: bool,
     fallback: bool,
     reason: str = "",
+    model: str = "",
+    latency_ms: Optional[float] = None,
 ) -> None:
     """Single measurable line for the pre-spawn gate."""
     payload = {
@@ -179,6 +182,8 @@ def log_jev_delegate(
         "override": bool(override),
         "fallback": bool(fallback),
         "reason": reason or "",
+        "model": model or "",
+        "latency_ms": None if latency_ms is None else round(float(latency_ms), 1),
     }
     logger.info(
         "[latency] "
@@ -192,6 +197,22 @@ def log_jev_delegate(
         payload["reason"] or "ok",
         extra={"jev_delegate": payload},
     )
+    try:
+        from gateway.jev_observability import record_jev_decision
+
+        record_jev_decision(
+            kind="delegate",
+            tier=choice,
+            model=model,
+            confidence=confidence,
+            latency_ms=latency_ms,
+            reason=reason or "ok",
+            content_hash_value=task_hash,
+            override=override,
+            fallback=fallback,
+        )
+    except Exception:
+        pass
 
 
 def _call_systemone(

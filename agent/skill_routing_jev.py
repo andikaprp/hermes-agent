@@ -21,6 +21,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
+from agent.jev_payload_hygiene import content_hash, mask_state_text
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ def build_jev_skill_routing_request(
         c.skill_id: c.criteria_text() for c in candidates
     }
     criteria[NONE_CHOICE] = "No listed skill clearly applies to this task"
-    text = (task_text or "").strip()
+    text = mask_state_text(task_text or "", limit=480)
     return {
         "model": model,
         "state": [
@@ -241,6 +242,8 @@ def log_jev_skill_route(
     fallback: bool,
     reason: str = "",
     model: str = "",
+    content_hash_value: str = "",
+    latency_ms: Optional[float] = None,
 ) -> None:
     """Single measurable line: chosen skill ids, confidence, fallback reason."""
     chosen_ids = [str(c) for c in chosen]
@@ -252,6 +255,8 @@ def log_jev_skill_route(
         "fallback": bool(fallback),
         "reason": reason or "",
         "model": model or "",
+        "content_hash": content_hash_value or "",
+        "latency_ms": None if latency_ms is None else round(float(latency_ms), 1),
     }
     logger.info(
         "[latency] "
@@ -265,6 +270,21 @@ def log_jev_skill_route(
         payload["model"] or "-",
         extra={"jev_skill_route": payload},
     )
+    try:
+        from gateway.jev_observability import record_jev_decision
+
+        record_jev_decision(
+            kind="skill_route",
+            tier=",".join(chosen_ids) if chosen_ids else "none",
+            model=model,
+            confidence=confidence,
+            latency_ms=latency_ms,
+            reason=reason or "ok",
+            content_hash_value=content_hash_value,
+            fallback=fallback,
+        )
+    except Exception:
+        pass
 
 
 def _fallback_reason_from_exc(exc: BaseException) -> str:
@@ -298,6 +318,7 @@ def maybe_override_auto_load_skills(
     default_list = [str(n).strip() for n in default_names if str(n).strip()]
     if not cfg.enabled:
         return None
+    task_hash = content_hash(task_text) if isinstance(task_text, str) else ""
     key = (api_key if api_key is not None else resolve_typesafe_api_key()).strip()
     if not key:
         log_jev_skill_route(
@@ -307,6 +328,7 @@ def maybe_override_auto_load_skills(
             fallback=True,
             reason="missing_key",
             model=cfg.model,
+            content_hash_value=task_hash,
         )
         return None
     if not isinstance(task_text, str) or not task_text.strip():
@@ -317,9 +339,11 @@ def maybe_override_auto_load_skills(
             fallback=True,
             reason="empty_task",
             model=cfg.model,
+            content_hash_value=task_hash,
         )
         return None
 
+    ready_ms = None
     try:
         cand_list = list(candidates) if candidates is not None else collect_top_skill_candidates(
             home_override=home_override,
@@ -332,11 +356,12 @@ def maybe_override_auto_load_skills(
                 fallback=True,
                 reason="no_candidates",
                 model=cfg.model,
+                content_hash_value=task_hash,
             )
             return None
         body = build_jev_skill_routing_request(task_text, cand_list, model=cfg.model)
         valid_ids = {c.skill_id for c in cand_list} | {NONE_CHOICE}
-        data, _ttft_ms, _ready_ms = _post_systemone(
+        data, _ttft_ms, ready_ms = _post_systemone(
             body,
             api_key=key,
             timeout_seconds=cfg.timeout_seconds,
@@ -352,6 +377,8 @@ def maybe_override_auto_load_skills(
             fallback=True,
             reason=reason,
             model=cfg.model,
+            content_hash_value=task_hash,
+            latency_ms=ready_ms,
         )
         return None
 
@@ -363,6 +390,8 @@ def maybe_override_auto_load_skills(
             fallback=True,
             reason="below_threshold",
             model=cfg.model,
+            content_hash_value=task_hash,
+            latency_ms=ready_ms,
         )
         return None
 
@@ -375,6 +404,8 @@ def maybe_override_auto_load_skills(
             fallback=False,
             reason="matches_default",
             model=cfg.model,
+            content_hash_value=task_hash,
+            latency_ms=ready_ms,
         )
         return None
 
@@ -385,5 +416,7 @@ def maybe_override_auto_load_skills(
         fallback=False,
         reason="",
         model=cfg.model,
+        content_hash_value=task_hash,
+        latency_ms=ready_ms,
     )
     return jev_names
