@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.delivery_voice import normalize_stream_dashes
+from gateway.delivery_voice import final_delivery_voice_check, normalize_stream_dashes
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 
 EM_DASH = "\u2014"
@@ -428,3 +428,62 @@ class TestTelegramAdapterDraftSeam:
 
         assert transport_mod._normalize_stream_dashes is normalize_stream_dashes
         assert tg_mod._normalize_stream_dashes is normalize_stream_dashes
+
+
+class TestStaleFinalizeReconcileEditSeam:
+    """The reconcile edit (stale finalize / transformed content) REPLACES the guarded
+    final send on a streamed turn, so it must run the same last-mile check the send
+    would. Before the fix it wrote the raw completed response, and an em dash that
+    the draft frames had normalized shipped in the final message (the exact
+    LAB-48 leak seen from Telegram DM)."""
+
+    @staticmethod
+    def _reconcile_edit(content):
+        from types import SimpleNamespace
+
+        from gateway.run_turn import GatewayTurnMixin
+
+        class _Harness(GatewayTurnMixin):
+            pass
+
+        harness = _Harness()
+        writes = []
+
+        class _Adapter:
+            async def edit_message(self, *, chat_id, message_id, content, finalize=False, metadata=None):
+                writes.append(content)
+                from gateway.platforms.base import SendResult
+
+                return SendResult(success=True, message_id="4813")
+
+        consumer = SimpleNamespace(message_id="4813", adapter=_Adapter())
+        response = {}
+        asyncio.run(harness._run_agent_edit_streamed_message(
+            consumer,
+            SimpleNamespace(chat_id="909987907"),
+            response,
+            content,
+            _sk="sess-edit-seam",
+            ok=("edited %s with the complete response.", "4813"),
+            fail_result=None,
+            fail_exc=None,
+        ))
+        assert response.get("already_sent") is True, "the successful edit was not marked sent"
+        return writes
+
+    def test_reconcile_edit_writes_guard_checked_final_text(self):
+        raw = f"Mimi {EM_DASH} your fix is tiny. {EN_DASH} really."
+
+        writes = self._reconcile_edit(raw)
+
+        assert writes == [final_delivery_voice_check(raw)]
+        assert EM_DASH not in writes[0] and EN_DASH not in writes[0]
+
+    def test_reconcile_edit_keeps_code_spans_byte_identical(self):
+        span = f"git log {EM_DASH} %an"
+        raw = f"Run `{span}` {EM_DASH} then reply."
+
+        writes = self._reconcile_edit(raw)
+
+        assert f"`{span}`" in writes[0], "a code span was rewritten by the reconcile edit"
+        assert "then reply" in writes[0]
