@@ -3860,7 +3860,15 @@ class GatewayTurnMixin:
     ) -> None:
         """Edit the stream consumer's message in place with ``content``; on success mark
         ``response["already_sent"]`` and log ``ok``. ``fail_result`` (None = trust the call) logs a
-        returned failure as ``(session, error)``; ``fail_exc`` logs an exception as ``(session, exc)``."""
+        returned failure as ``(session, error)``; ``fail_exc`` logs an exception as ``(session, exc)``.
+
+        This edit is the user-facing replacement for the suppressed guarded final send,
+        so ``content`` crosses the same last-mile check (em/en dashes, canned
+        scaffolding, internal markers) as ``send_final_ledgered``: the draft frames were
+        already dash-normalized, but the reconcile edit writes the RAW completed
+        response, and an unguarded dash would ship exactly on this seam."""
+        from gateway.delivery_voice import final_delivery_voice_check
+        content = final_delivery_voice_check(content)
         try:
             _res = await _sc.adapter.edit_message(
                 chat_id=source.chat_id, message_id=_sc.message_id, content=content, finalize=True,
