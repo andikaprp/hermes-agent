@@ -433,6 +433,14 @@ DEFAULT_CONFIG = {
         # is the legacy override that bypasses that denylist entirely.
         "allow_unsafe_evaluate": False,
         "restrict_evaluate": False,
+        # Optional TypeSafe Jev action gate (LAB-60): same withheld-context contract as
+        # computer_use.jev_action_gate. OFF by default; fail-open to reobserve.
+        "jev_action_gate": {
+            "enabled": False,
+            "threshold": 0.65,
+            "model": "jev-latest",
+            "timeout_seconds": 3,
+        },
         # CDP supervisor: dialog + frame detection over a persistent WebSocket; active only with a
         # CDP-capable backend (Browserbase, or local Chrome via /browser connect). See
         # website/docs/developer-guide/browser-supervisor.md.
@@ -2433,6 +2441,16 @@ DEFAULT_CONFIG = {
         # closed unless signed with the official com.trycua.driver identity. Only for local driver
         # development from source.
         "allow_unsigned_driver": False,
+        # Optional TypeSafe Jev action gate (LAB-60): pick next computer-use action from a
+        # pre-approved table with withheld context (goal + short labels only). OFF by default;
+        # errors/timeouts/low confidence fail open to reobserve. Complements existing approval
+        # / risk gates — chosen actions still pass them on execute.
+        "jev_action_gate": {
+            "enabled": False,
+            "threshold": 0.65,
+            "model": "jev-latest",
+            "timeout_seconds": 3,
+        },
     },
     # Egress credential-injection proxy (iron-proxy) for remote terminal sandboxes (Docker today):
     # the sandbox sees opaque tokens and iron-proxy swaps in real credentials at egress, so a
@@ -2715,8 +2733,9 @@ OPTIONAL_ENV_VARS = {
         "(gateway.telegram.jev_routing.enabled), the optional pre-spawn delegation gate "
         "(delegation.jev_check), optional session-setup skill selection "
         "(agent.skill_routing.enabled), optional durable-memory noul triage "
-        "(memory.jev_triage.enabled), and optional PR review triage "
-        "(code_review.jev_triage.enabled)",
+        "(memory.jev_triage.enabled), optional PR review triage "
+        "(code_review.jev_triage.enabled), and the computer/browser Jev action gate "
+        "(computer_use.jev_action_gate / browser.jev_action_gate)", 
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
