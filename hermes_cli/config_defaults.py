@@ -2010,6 +2010,17 @@ DEFAULT_CONFIG = {
         # boot (ambiguous cases carry a "recovered reply — may be a duplicate" marker;
         # at-least-once). Disable to lose in-flight final responses on crash/restart.
         "delivery_ledger": True,
+        # Optional TypeSafe Jev completion verification before a turn is claimed
+        # done/delivered (LAB-61 Canny-style; default OFF). Scores done/partial/failed
+        # from result hashes + verification_evidence metadata (never raw prompts).
+        # Fail-open on missing key / timeout / errors; low confidence, evidence
+        # contradiction, or confident non-done escalates to HITL (never auto-claims done).
+        "jev_completion": {
+            "enabled": False,
+            "threshold": 0.75,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+        },
         # Seconds to wait for one platform to connect at startup/reconnect; raise on "discord
         # connect timed out" loops (many slash commands to sync). 0/negative = wait forever. Bridged
         # to HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT, which wins if set explicitly.
@@ -2734,8 +2745,9 @@ OPTIONAL_ENV_VARS = {
         "(delegation.jev_check), optional session-setup skill selection "
         "(agent.skill_routing.enabled), optional durable-memory noul triage "
         "(memory.jev_triage.enabled), optional PR review triage "
-        "(code_review.jev_triage.enabled), and the computer/browser Jev action gate "
-        "(computer_use.jev_action_gate / browser.jev_action_gate)", 
+        "(code_review.jev_triage.enabled), the computer/browser Jev action gate "
+        "(computer_use.jev_action_gate / browser.jev_action_gate), and gateway turn "
+        "completion verification (gateway.jev_completion.enabled)", 
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
