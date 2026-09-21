@@ -336,16 +336,35 @@ def fast_path_reason(
         return None
     if str(chat_type or "").lower() not in _DM_CHAT_TYPES:
         return None
+    from gateway.run_turn_fast_path_sticky import (
+        load_sticky_seconds,
+        sticky_hard_bypass,
+        sticky_has_entry,
+        sticky_lookup,
+        sticky_store,
+    )
+
+    sticky_seconds = load_sticky_seconds(user_config)
+    hard_bypass = sticky_hard_bypass(message)
+    if sticky_seconds > 0 and chat_id is not None and not hard_bypass:
+        if sticky_has_entry(chat_id, sticky_seconds):
+            return sticky_lookup(chat_id, sticky_seconds)
+
     band = classify_fast_path_band(message, history=history)
     if band in ("ack", "social"):
-        return band
-    if band != FAST_PATH_UNCERTAIN:
-        return None
-    from gateway.run_turn_jev_routing import maybe_jev_route_uncertain
+        verdict: Optional[str] = band
+    elif band != FAST_PATH_UNCERTAIN:
+        verdict = None
+    else:
+        from gateway.run_turn_jev_routing import maybe_jev_route_uncertain
 
-    return maybe_jev_route_uncertain(
-        message, history=history, user_config=user_config, chat_id=chat_id,
-    )
+        verdict = maybe_jev_route_uncertain(
+            message, history=history, user_config=user_config, chat_id=chat_id,
+        )
+
+    if sticky_seconds > 0 and chat_id is not None and not hard_bypass:
+        sticky_store(chat_id, verdict, sticky_seconds)
+    return verdict
 
 
 def apply_fast_path_note(message: str, reason: str, *, chat_id: Any = None) -> str:

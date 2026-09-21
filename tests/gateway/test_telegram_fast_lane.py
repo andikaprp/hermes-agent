@@ -243,6 +243,32 @@ def test_try_fast_lane_falls_back_on_ttft_budget():
     assert result is None
 
 
+def test_try_fast_lane_escalates_oversized_user_message_without_llm():
+    called = []
+
+    def fake(**kwargs):
+        called.append(1)
+        return iter([_chunk("x")])
+
+    max_chars = 100
+    long_msg = "x" * int(max_chars * 0.96)
+    result = try_fast_lane(
+        history=[],
+        user_message=long_msg,
+        user_config={
+            "gateway": {"telegram": {"fast_lane": {
+                "enabled": True,
+                "max_chars": max_chars,
+                "escalate_oversized": True,
+            }}},
+        },
+        main_runtime={"provider": "test", "model": "m", "api_key": "k"},
+        call_llm_fn=fake,
+    )
+    assert result is None
+    assert called == []
+
+
 def test_try_fast_lane_disabled_returns_none_without_calling_provider():
     called = []
 

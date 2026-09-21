@@ -10,8 +10,9 @@ the agent call and only decides routing.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Tuple
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
@@ -47,6 +48,16 @@ class JevRoutingConfig:
     threshold: float = DEFAULT_THRESHOLD
     model: str = DEFAULT_JEV_MODEL
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
+    verdict_cache_ttl_seconds: float = 0.0
+    breaker_trips: int = 3
+    breaker_cooldown_seconds: float = 30.0
+
+
+# Process-wide verdict cache and circuit breaker (tests reset via reset_jev_routing_runtime).
+_VERDICT_CACHE: dict[Tuple[Any, str], Tuple[Optional[str], float]] = {}
+_BREAKER_FAILURES: int = 0
+_BREAKER_OPEN_UNTIL: float = 0.0
+_BREAKER_PROBE_ARMED: bool = False
 
 
 def parse_jev_routing_config(raw: Any) -> JevRoutingConfig:
@@ -65,11 +76,29 @@ def parse_jev_routing_config(raw: Any) -> JevRoutingConfig:
     except (TypeError, ValueError):
         timeout_seconds = DEFAULT_TIMEOUT_SECONDS
     timeout_seconds = max(1.0, timeout_seconds)
+    try:
+        verdict_cache_ttl_seconds = float(raw.get("verdict_cache_ttl_seconds", 0))
+    except (TypeError, ValueError):
+        verdict_cache_ttl_seconds = 0.0
+    verdict_cache_ttl_seconds = max(0.0, verdict_cache_ttl_seconds)
+    try:
+        breaker_trips = int(raw.get("breaker_trips", 3))
+    except (TypeError, ValueError):
+        breaker_trips = 3
+    breaker_trips = max(1, breaker_trips)
+    try:
+        breaker_cooldown_seconds = float(raw.get("breaker_cooldown_seconds", 30))
+    except (TypeError, ValueError):
+        breaker_cooldown_seconds = 30.0
+    breaker_cooldown_seconds = max(1.0, breaker_cooldown_seconds)
     return JevRoutingConfig(
         enabled=enabled,
         threshold=threshold,
         model=model,
         timeout_seconds=timeout_seconds,
+        verdict_cache_ttl_seconds=verdict_cache_ttl_seconds,
+        breaker_trips=breaker_trips,
+        breaker_cooldown_seconds=breaker_cooldown_seconds,
     )
 
 
@@ -82,6 +111,112 @@ def load_jev_routing_config(user_config: Any = None) -> JevRoutingConfig:
         return parse_jev_routing_config(raw)
     except Exception:
         return JevRoutingConfig()
+
+
+def reset_jev_routing_runtime_for_tests() -> None:
+    """Clear module-level verdict cache and breaker state (tests only)."""
+    global _BREAKER_FAILURES, _BREAKER_OPEN_UNTIL, _BREAKER_PROBE_ARMED
+    _VERDICT_CACHE.clear()
+    _BREAKER_FAILURES = 0
+    _BREAKER_OPEN_UNTIL = 0.0
+    _BREAKER_PROBE_ARMED = False
+
+
+def _verdict_cache_get(
+    chat_id: Any, msg_hash: str, ttl_seconds: float,
+) -> Tuple[Optional[str], bool]:
+    if ttl_seconds <= 0 or not msg_hash:
+        return None, False
+    key = (chat_id, msg_hash)
+    entry = _VERDICT_CACHE.get(key)
+    if entry is None:
+        return None, False
+    verdict, expires = entry
+    if time.monotonic() > expires:
+        _VERDICT_CACHE.pop(key, None)
+        return None, False
+    return verdict, True
+
+
+def _verdict_cache_put(
+    chat_id: Any,
+    msg_hash: str,
+    verdict: Optional[str],
+    configured_ttl: float,
+) -> None:
+    if configured_ttl <= 0 or not msg_hash:
+        return
+    if verdict == "social":
+        ttl = configured_ttl
+    else:
+        ttl = min(30.0, configured_ttl)
+    _VERDICT_CACHE[(chat_id, msg_hash)] = (verdict, time.monotonic() + ttl)
+
+
+def _breaker_blocks_jev_call() -> bool:
+    """Return True when the breaker blocks a Jev HTTP call (fail-soft skip)."""
+    global _BREAKER_PROBE_ARMED
+    now = time.monotonic()
+    if now < _BREAKER_OPEN_UNTIL:
+        return True
+    if _BREAKER_OPEN_UNTIL > 0.0:
+        if not _BREAKER_PROBE_ARMED:
+            _BREAKER_PROBE_ARMED = True
+            return False
+        return True
+    return False
+
+
+def _breaker_on_jev_success() -> None:
+    global _BREAKER_FAILURES, _BREAKER_OPEN_UNTIL, _BREAKER_PROBE_ARMED
+    _BREAKER_FAILURES = 0
+    _BREAKER_OPEN_UNTIL = 0.0
+    _BREAKER_PROBE_ARMED = False
+
+
+def _breaker_on_jev_failure(cfg: JevRoutingConfig) -> None:
+    global _BREAKER_FAILURES, _BREAKER_OPEN_UNTIL, _BREAKER_PROBE_ARMED
+    was_probe = _BREAKER_PROBE_ARMED
+    _BREAKER_PROBE_ARMED = False
+    _BREAKER_FAILURES += 1
+    if _BREAKER_FAILURES >= cfg.breaker_trips or was_probe:
+        _BREAKER_OPEN_UNTIL = time.monotonic() + cfg.breaker_cooldown_seconds
+
+
+def _prior_user_turns_block(
+    history: Optional[Sequence[Any]], *, max_turns: int = 2,
+) -> Optional[str]:
+    if not history:
+        return None
+    collected: list[str] = []
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").lower() != "user":
+            continue
+        raw_content = item.get("content")
+        if raw_content is None:
+            continue
+        if isinstance(raw_content, list):
+            parts: list[str] = []
+            for part in raw_content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text") or ""))
+            text = " ".join(parts).strip()
+        else:
+            text = str(raw_content).strip()
+        if not text:
+            continue
+        masked = mask_state_text(text, limit=800)
+        if masked:
+            collected.append(masked)
+        if len(collected) >= max_turns:
+            break
+    if not collected:
+        return None
+    collected.reverse()
+    lines = "\n".join(f"- {line}" for line in collected)
+    return f"Prior user turns:\n{lines}"
 
 
 def _lexicon_state_context() -> str:
@@ -98,15 +233,22 @@ def _lexicon_state_context() -> str:
     )
 
 
-def build_jev_routing_request(message: str, *, model: str = DEFAULT_JEV_MODEL) -> dict:
+def build_jev_routing_request(
+    message: str,
+    *,
+    model: str = DEFAULT_JEV_MODEL,
+    history: Optional[Sequence[Any]] = None,
+) -> dict:
     """System One choice request: redacted/truncated message + lexicon context as state."""
+    state: list[str] = [_lexicon_state_context()]
+    prior = _prior_user_turns_block(history)
+    if prior:
+        state.append(prior)
     text = mask_state_text(message or "", limit=280)
+    state.append(f"Inbound message:\n{text}")
     return {
         "model": model,
-        "state": [
-            _lexicon_state_context(),
-            f"Inbound message:\n{text}",
-        ],
+        "state": state,
         "questions": {
             ROUTE_QUESTION_ID: {
                 "type": "choice",
@@ -150,6 +292,7 @@ def log_jev_routing(
     reason: str = "",
     latency_ms: Optional[float] = None,
     content_hash_value: str = "",
+    state_chars: Optional[int] = None,
 ) -> None:
     payload = {
         "marker": JEV_ROUTING_MARKER,
@@ -194,6 +337,7 @@ def log_jev_routing(
             content_hash_value=content_hash_value,
             took_jev=took_jev,
             fallback=fallback,
+            state_chars=state_chars,
         )
     except Exception:
         pass
@@ -211,13 +355,43 @@ def maybe_jev_route_uncertain(
     """For an uncertain-band message: ask Jev, or return ``None`` (deterministic default).
 
     Returns ``"social"`` only when Jev chooses ``lane`` with confidence >= threshold.
-    ``history`` is accepted for call-site symmetry; routing state is the message text.
+    ``history`` supplies masked prior user turns for Jev state when present.
     """
-    del history  # state is the inbound text + lexicon; history unused by design
     cfg = load_jev_routing_config(user_config)
     if not cfg.enabled:
         return None
     msg_hash = content_hash(message) if isinstance(message, str) else ""
+    cached_verdict, cache_hit = _verdict_cache_get(
+        chat_id, msg_hash, cfg.verdict_cache_ttl_seconds,
+    )
+    if cache_hit:
+        log_jev_routing(
+            state="uncertain",
+            model=cfg.model,
+            choice="lane" if cached_verdict == "social" else "",
+            confidence=None,
+            threshold=cfg.threshold,
+            took_jev=cached_verdict == "social",
+            chat_id=chat_id,
+            fallback=cached_verdict != "social",
+            reason="cache_hit",
+            content_hash_value=msg_hash,
+        )
+        return cached_verdict
+    if _breaker_blocks_jev_call():
+        log_jev_routing(
+            state="uncertain",
+            model=cfg.model,
+            choice="",
+            confidence=None,
+            threshold=cfg.threshold,
+            took_jev=False,
+            chat_id=chat_id,
+            fallback=True,
+            reason="breaker_open",
+            content_hash_value=msg_hash,
+        )
+        return None
     key = (api_key if api_key is not None else resolve_typesafe_api_key()).strip()
     if not key:
         log_jev_routing(
@@ -248,8 +422,9 @@ def maybe_jev_route_uncertain(
         )
         return None
     ready_ms: Optional[float] = None
+    body: dict[str, Any] = {}
     try:
-        body = build_jev_routing_request(message, model=cfg.model)
+        body = build_jev_routing_request(message, model=cfg.model, history=history)
         data, _ttft_ms, ready_ms = _post_systemone(
             body,
             api_key=key,
@@ -257,7 +432,9 @@ def maybe_jev_route_uncertain(
             http_client=http_client,
         )
         choice, confidence = parse_route_answer(data)
+        _breaker_on_jev_success()
     except Exception as exc:
+        _breaker_on_jev_failure(cfg)
         reason = type(exc).__name__
         # Prefer a short stable reason when the exception message is known.
         msg = str(exc).strip()
@@ -280,6 +457,7 @@ def maybe_jev_route_uncertain(
         )
         return None
 
+    state_chars = sum(len(s) for s in body.get("state", []))
     took = confidence >= cfg.threshold
     log_jev_routing(
         state="uncertain",
@@ -293,7 +471,11 @@ def maybe_jev_route_uncertain(
         reason="" if took else "below_threshold",
         latency_ms=ready_ms,
         content_hash_value=msg_hash,
+        state_chars=state_chars,
     )
     if took and choice == "lane":
-        return "social"
-    return None
+        verdict: Optional[str] = "social"
+    else:
+        verdict = None
+    _verdict_cache_put(chat_id, msg_hash, verdict, cfg.verdict_cache_ttl_seconds)
+    return verdict
