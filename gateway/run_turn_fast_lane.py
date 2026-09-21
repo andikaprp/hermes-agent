@@ -154,6 +154,7 @@ def load_fast_lane_config(user_config: Any = None) -> Dict[str, Any]:
         "max_messages": _DEFAULT_MAX_MESSAGES,
         "max_chars": _DEFAULT_MAX_CHARS,
         "ttft_budget_ms": _DEFAULT_TTFT_MS,
+        "escalate_oversized": True,
     }
     try:
         gw = user_config.get("gateway") if isinstance(user_config, dict) else None
@@ -180,6 +181,14 @@ def load_fast_lane_config(user_config: Any = None) -> Dict[str, Any]:
                     cfg[key] = cast(raw[key])
                 except (TypeError, ValueError):
                     pass
+        if "escalate_oversized" in raw:
+            value = raw.get("escalate_oversized")
+            if isinstance(value, str):
+                cfg["escalate_oversized"] = value.strip().lower() not in {
+                    "false", "0", "no", "off",
+                }
+            else:
+                cfg["escalate_oversized"] = bool(value)
     except Exception:
         pass
     return cfg
@@ -427,11 +436,17 @@ def try_fast_lane(
         log_fast_lane(provider="none", ttft_ms=None, ready_ms=None, fallback=True, chat_id=chat_id)
         return None
 
+    max_chars = int(cfg.get("max_chars") or _DEFAULT_MAX_CHARS)
+    if cfg.get("escalate_oversized", True):
+        raw = user_message if isinstance(user_message, str) else ""
+        if len(raw) > max_chars * 0.95:
+            return None
+
     messages = build_compact_transcript(
         history,
         _lane_user_message(history, user_message, model),
         max_messages=int(cfg.get("max_messages") or _DEFAULT_MAX_MESSAGES),
-        max_chars=int(cfg.get("max_chars") or _DEFAULT_MAX_CHARS),
+        max_chars=max_chars,
     )
     ttft_budget_ms = int(cfg.get("ttft_budget_ms") or _DEFAULT_TTFT_MS)
     # Whole-call ceiling: TTFT budget plus room to finish a short social reply.

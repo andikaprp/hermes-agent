@@ -29,6 +29,7 @@ from gateway.run_turn_jev_routing import (
     maybe_jev_route_uncertain,
     parse_jev_routing_config,
     parse_route_answer,
+    reset_jev_routing_runtime_for_tests,
 )
 
 
@@ -49,6 +50,13 @@ def _enabled_cfg(**overrides: Any) -> Dict[str, Any]:
     }
     block.update(overrides)
     return {"gateway": {"telegram": {"jev_routing": block, "fast_path": True}}}
+
+
+@pytest.fixture(autouse=True)
+def _reset_jev_routing_runtime():
+    reset_jev_routing_runtime_for_tests()
+    yield
+    reset_jev_routing_runtime_for_tests()
 
 
 def _choice_response(choice: str, confidence: float) -> Dict[str, Any]:
@@ -271,3 +279,83 @@ class TestJevRoutingHelpers:
         choice, conf = parse_route_answer(_choice_response("task", 0.91))
         assert choice == "task"
         assert conf == pytest.approx(0.91)
+
+    def test_build_request_includes_masked_prior_user_turns(self):
+        history = [
+            {"role": "assistant", "content": "Hello"},
+            {"role": "user", "content": "token sk-live-abcdefghijklmnopqrstuvwxyz123456"},
+            {"role": "assistant", "content": "Noted."},
+            {"role": "user", "content": "follow up please"},
+        ]
+        body = build_jev_routing_request("alright then", history=history)
+        prior_blob = next(s for s in body["state"] if s.startswith("Prior user turns"))
+        assert "sk-live" not in prior_blob
+        assert "[secret]" in prior_blob
+        assert "follow up please" in prior_blob
+        assert len(body["state"]) == 3
+
+    def test_verdict_cache_skips_second_http(self):
+        http = _FakeHttp(_choice_response("lane", 0.95))
+        cfg = _enabled_cfg(verdict_cache_ttl_seconds=120)
+        chat_id = 4242
+        first = maybe_jev_route_uncertain(
+            UNCERTAIN_MSG,
+            user_config=cfg,
+            chat_id=chat_id,
+            http_client=http,
+            api_key="test-key",
+        )
+        assert first == "social"
+        assert len(http.calls) == 1
+        second = maybe_jev_route_uncertain(
+            UNCERTAIN_MSG,
+            user_config=cfg,
+            chat_id=chat_id,
+            http_client=http,
+            api_key="test-key",
+        )
+        assert second == "social"
+        assert len(http.calls) == 1
+
+    def test_breaker_opens_after_failures_and_probes_after_cooldown(self, monkeypatch):
+        clock = {"t": 0.0}
+        monkeypatch.setattr(
+            "gateway.run_turn_jev_routing.time.monotonic",
+            lambda: clock["t"],
+        )
+
+        def _fail(*_a, **_k):
+            raise RuntimeError("jev down")
+
+        monkeypatch.setattr("gateway.run_turn_jev_routing._post_systemone", _fail)
+        cfg = _enabled_cfg(breaker_trips=2, breaker_cooldown_seconds=30)
+        for _ in range(2):
+            assert (
+                maybe_jev_route_uncertain(
+                    UNCERTAIN_MSG, user_config=cfg, api_key="k", chat_id=1,
+                )
+                is None
+            )
+        blocked = maybe_jev_route_uncertain(
+            UNCERTAIN_MSG, user_config=cfg, api_key="k", chat_id=1,
+        )
+        assert blocked is None
+
+        clock["t"] = 100.0
+        calls = {"n": 0}
+
+        def _ok(*_a, **_k):
+            calls["n"] += 1
+            return (_choice_response("lane", 0.99), 1.0, 2.0)
+
+        monkeypatch.setattr("gateway.run_turn_jev_routing._post_systemone", _ok)
+        probed = maybe_jev_route_uncertain(
+            UNCERTAIN_MSG, user_config=cfg, api_key="k", chat_id=1,
+        )
+        assert probed == "social"
+        assert calls["n"] == 1
+        after_reset = maybe_jev_route_uncertain(
+            UNCERTAIN_MSG, user_config=cfg, api_key="k", chat_id=1,
+        )
+        assert after_reset == "social"
+        assert calls["n"] == 2

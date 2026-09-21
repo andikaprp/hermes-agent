@@ -2115,6 +2115,8 @@ DEFAULT_CONFIG = {
                 "max_messages": 6,
                 "max_chars": 2000,
                 "ttft_budget_ms": 8000,
+                "sticky_seconds": 0,
+                "escalate_oversized": True,
                 # Optional TypeSafe Jev check on the lane DRAFT before send
                 # (default OFF). Fail-open: missing key / timeout / errors send
                 # the draft; only a confident escalate falls back to the one-hop path.
@@ -2134,6 +2136,9 @@ DEFAULT_CONFIG = {
                 "threshold": 0.85,
                 "model": "jev-latest",
                 "timeout_seconds": 30,
+                "verdict_cache_ttl_seconds": 0,
+                "breaker_trips": 3,
+                "breaker_cooldown_seconds": 30,
             },
         },
         # LAB-59: local Jev decision observability (default OFF). shadow/on append

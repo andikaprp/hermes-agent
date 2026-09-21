@@ -494,6 +494,42 @@ def test_fast_path_outcome_records_call_counts(caplog):
     assert "4242" not in caplog.text
 
 
+def test_sticky_lane_reuses_verdict_for_ambiguous_followups():
+    from gateway.run_turn_fast_path_sticky import clear_sticky_state
+
+    clear_sticky_state()
+    cfg = {"gateway": {"telegram": {"fast_lane": {"sticky_seconds": 60}}}}
+    chat_id = "sticky-chat-1"
+    assert fast_path_reason(
+        "hi", platform_key="telegram", chat_type="dm",
+        history=ASSISTANT_STATED, user_config=cfg, chat_id=chat_id,
+    ) == "social"
+    assert classify_fast_path("test", history=ASSISTANT_STATED) is None
+    assert fast_path_reason(
+        "test", platform_key="telegram", chat_type="dm",
+        history=ASSISTANT_STATED, user_config=cfg, chat_id=chat_id,
+    ) == "social"
+    clear_sticky_state()
+
+
+def test_sticky_hard_bypass_url_ignores_lane_stickiness():
+    from gateway.run_turn_fast_path_sticky import clear_sticky_state
+
+    clear_sticky_state()
+    cfg = {"gateway": {"telegram": {"fast_lane": {"sticky_seconds": 60}}}}
+    chat_id = "sticky-chat-2"
+    assert fast_path_reason(
+        "hi", platform_key="telegram", chat_type="dm",
+        history=None, user_config=cfg, chat_id=chat_id,
+    ) == "social"
+    assert fast_path_reason(
+        "see https://example.com/a",
+        platform_key="telegram", chat_type="dm",
+        history=ASSISTANT_STATED, user_config=cfg, chat_id=chat_id,
+    ) is None
+    clear_sticky_state()
+
+
 def test_fast_path_outcome_counts_tool_calls_from_assistant_rows(caplog):
     import logging
 
