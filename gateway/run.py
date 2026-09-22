@@ -4265,6 +4265,12 @@ class GatewayRunner(
         ("compression", "proactive_prune_min_result_chars"),
         ("compression", "proactive_prune_min_reclaim_tokens"),
         ("compression", "min_tail_user_messages"), ("agent", "disabled_toolsets"),
+        # compression.semantic_pins, compression.visibility_ladder, and
+        # compression.cache_reuse_decision are intentionally absent. They are
+        # init-consumed (parsed in agent_init, stored on ContextCompressor), same
+        # boundary as compression.jev_scorer. This does not resolve the existing
+        # conflict for compression.threshold, which is listed here and also
+        # documented as consumed at agent init.
         ("memory", "provider"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
         ("checkpoints", "max_total_size_mb"), ("checkpoints", "max_file_size_mb"))
 

@@ -1506,6 +1506,9 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
         codex_responses_compact_threshold=compact_threshold,
         idle_compact_after_seconds=idle_compact_after_seconds,
         jev_scorer=_parse_jev_scorer_config(cfg),
+        semantic_pins=_parse_semantic_pins_config(cfg),
+        visibility_ladder=_parse_visibility_ladder_config(cfg),
+        cache_reuse_decision=_parse_cache_reuse_decision(cfg),
     )
 
 
@@ -1514,6 +1517,30 @@ def _parse_jev_scorer_config(cfg: Dict[str, Any]):
     from agent.context_compressor_jev import parse_jev_scorer_config
 
     return parse_jev_scorer_config(_cfg_dict(cfg, "jev_scorer"))
+
+
+def _parse_semantic_pins_config(cfg: Dict[str, Any]):
+    """Parse ``compression.semantic_pins``. Init-consumed; default disabled.
+
+    Not hot-reloaded. See ``agent.semantic_pins.RELOAD_BOUNDARY``.
+    """
+    from agent.semantic_pins import parse_semantic_pins_config
+
+    return parse_semantic_pins_config(_cfg_dict(cfg, "semantic_pins"))
+
+
+def _parse_visibility_ladder_config(cfg: Dict[str, Any]):
+    """Parse ``compression.visibility_ladder``. Init-consumed; default disabled."""
+    from agent.visibility_ladder import parse_visibility_ladder_config
+
+    return parse_visibility_ladder_config(_cfg_dict(cfg, "visibility_ladder"))
+
+
+def _parse_cache_reuse_decision(cfg: Dict[str, Any]):
+    """Always false. Deliberate non-adoption; see CACHE_REUSE_DECISION_REASON."""
+    from agent.context_compressor_jev import parse_cache_reuse_decision
+
+    return parse_cache_reuse_decision(cfg.get("cache_reuse_decision", False))
 
 
 def _warn_invalid_config_int(
@@ -1864,6 +1891,9 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             min_tail_user_messages=cs.min_tail_users, tail_mode=cs.tail_mode,
             custom_providers=_custom_providers,
             jev_scorer=getattr(cs, "jev_scorer", None),
+            semantic_pins=getattr(cs, "semantic_pins", None),
+            visibility_ladder=getattr(cs, "visibility_ladder", None),
+            cache_reuse_decision=getattr(cs, "cache_reuse_decision", False),
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):

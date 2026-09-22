@@ -670,6 +670,27 @@ DEFAULT_CONFIG = {
             "model": "jev-latest",
             "timeout_seconds": 30,
         },
+        # Semantic do-not-shrink pins (default OFF, init-consumed). A marked span
+        # survives compaction verbatim independent of protect_first_n,
+        # protect_last_n, and the Jev keep score. Closed class set only.
+        # Not in the gateway cache-busting table and not TUI-hot-reloaded.
+        # See website/docs/developer-guide/context-compression-and-caching.md.
+        "semantic_pins": {
+            "enabled": False,
+            "classes": ["active_task", "goal_scaffold", "standing_instruction"],
+        },
+        # Query-aware visibility ladder (default OFF, init-consumed). Four levels:
+        # hidden (not sent), short, long, full. Items move between levels; they
+        # are not deleted. Scoring is slow_path_only or async_precompute, never
+        # on the fast-lane hot path.
+        "visibility_ladder": {
+            "enabled": False,
+            "scoring": "slow_path_only",
+        },
+        # Deliberate non-adoption. MUST stay false. LAB-52 says never mutate the
+        # cached prefix; AGENTS.md says prompt caching is sacred; measured
+        # steady-state prompt-cache hit rate is about 99 percent.
+        "cache_reuse_decision": False,
     },
     # Anthropic prompt caching (Claude via OpenRouter or native API). cache_ttl: "5m" | "1h"; other
     # non-falsy values are ignored; falsy (false, null, "off", "disabled", "no", "none") disables
@@ -2751,8 +2772,10 @@ OPTIONAL_ENV_VARS = {
         "(agent.skill_routing.enabled), optional durable-memory noul triage "
         "(memory.jev_triage.enabled), optional PR review triage "
         "(code_review.jev_triage.enabled), the computer/browser Jev action gate "
-        "(computer_use.jev_action_gate / browser.jev_action_gate), and gateway turn "
-        "completion verification (gateway.jev_completion.enabled)", 
+        "(computer_use.jev_action_gate / browser.jev_action_gate), gateway turn "
+        "completion verification (gateway.jev_completion.enabled), optional semantic "
+        "do-not-shrink pins (compression.semantic_pins.enabled), and the optional "
+        "query-aware visibility ladder (compression.visibility_ladder.enabled)", 
         "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
