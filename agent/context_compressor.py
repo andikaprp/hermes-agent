@@ -2302,6 +2302,8 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
         custom_providers: list | None = None, jev_scorer: Any = None,
+        semantic_pins: Any = None, visibility_ladder: Any = None,
+        cache_reuse_decision: Any = None,
     ):
         self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
@@ -2311,6 +2313,25 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             self.jev_scorer = jev_scorer
         else:
             self.jev_scorer = parse_jev_scorer_config(jev_scorer)
+        from agent.semantic_pins import SemanticPinsConfig, parse_semantic_pins_config
+        from agent.visibility_ladder import (
+            VisibilityLadderConfig,
+            VisibilityLedger,
+            parse_visibility_ladder_config,
+        )
+        from agent.context_compressor_jev import parse_cache_reuse_decision
+        if isinstance(semantic_pins, SemanticPinsConfig):
+            self.semantic_pins = semantic_pins
+        else:
+            self.semantic_pins = parse_semantic_pins_config(semantic_pins)
+        if isinstance(visibility_ladder, VisibilityLadderConfig):
+            self.visibility_ladder = visibility_ladder
+        else:
+            self.visibility_ladder = parse_visibility_ladder_config(visibility_ladder)
+        # Deliberate non-adoption. See CACHE_REUSE_DECISION_REASON in context_compressor_jev.
+        self.cache_reuse_decision = parse_cache_reuse_decision(cache_reuse_decision)
+        self._pending_pin_splice: list = []
+        self._visibility_ledger = VisibilityLedger()
         # Per-model context_length overrides live in custom_providers; without them deferred
         # resolution falls back to the hardcoded family catalog (#83324).
         self.custom_providers = custom_providers or None
@@ -4641,6 +4662,64 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         return thin_compressible_window(turns_to_summarize, cfg=cfg).messages
 
+    def _apply_lab52_window(
+        self,
+        turns: List[Dict[str, Any]],
+        messages: List[Dict[str, Any]],
+        focus_topic: Optional[str],
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """Apply semantic pins and the visibility ladder. Identity when both are off.
+
+        A Jev failure returns the original list and does not splice pins, so the
+        rest of compress() stays on the unchanged path. Explicit pins with the
+        ladder off are extracted before the binary Jev thin, so a low keep score
+        cannot stub them. The head (cached prefix) is not rewritten here.
+        """
+        pins = getattr(self, "semantic_pins", None)
+        ladder = getattr(self, "visibility_ladder", None)
+        if not getattr(pins, "enabled", False) and not getattr(ladder, "enabled", False):
+            return turns, False
+        from agent.semantic_pins import SemanticPinsConfig
+        from agent.visibility_ladder import VisibilityLadderConfig, current_question, prepare_compressible_window
+        if not isinstance(pins, SemanticPinsConfig):
+            pins = SemanticPinsConfig(enabled=bool(getattr(pins, "enabled", False)))
+        if not isinstance(ladder, VisibilityLadderConfig):
+            ladder = VisibilityLadderConfig(enabled=bool(getattr(ladder, "enabled", False)))
+        try:
+            result = prepare_compressible_window(
+                turns,
+                pins=pins,
+                ladder=ladder,
+                question=current_question(messages, focus_topic),
+                ledger=getattr(self, "_visibility_ledger", None),
+                jev_cfg=getattr(self, "jev_scorer", None),
+            )
+        except Exception as exc:
+            logger.info("jev_scorer fallback to existing compression path: %s", type(exc).__name__)
+            self._pending_pin_splice = []
+            return turns, False
+        if result.fallback:
+            self._pending_pin_splice = []
+            return turns, False
+        self._pending_pin_splice = list(result.pinned_verbatim)
+        return result.turns, bool(result.skip_binary_thin)
+
+    def _bridge_pinned_spans(
+        self, compressed: List[Dict[str, Any]], pins: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Insert redacted verbatim pins, with a one-row bridge only to avoid same-role adjacency."""
+        out: List[Dict[str, Any]] = []
+        previous = compressed[-1].get("role") if compressed else None
+        for pin in pins:
+            role = pin.get("role")
+            if role in {"user", "assistant"} and role == previous:
+                bridge = "assistant" if role == "user" else "user"
+                out.append({"role": bridge, "content": "(pinned span retained)"})
+                previous = bridge
+            out.append(pin)
+            previous = role
+        return out
+
     def compress(
         self, messages: List[Dict[str, Any]], current_tokens: Optional[int] = None, focus_topic: Optional[str] = None,
         force: bool = False, memory_context: str = "", bypass_cooldown: bool = False,
@@ -4661,6 +4740,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         the caller's attempt budget.
         """
         telemetry = self._begin_compress_attempt(current_tokens, force)
+        self._pending_pin_splice = []
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1
@@ -4712,9 +4792,17 @@ Write only the summary body. Do not include any preamble or prefix."""
                 display_tokens, compress_start, compress_end, len(turns_to_summarize), n_messages - scan.tail_start,
             )
 
+        # Optional semantic pins + visibility ladder (both default OFF). On any
+        # Jev failure the original turns are kept. Pins are extracted before the
+        # binary thin so a low keep score cannot stub them.
+        turns_to_summarize, skip_binary_thin = self._apply_lab52_window(
+            turns_to_summarize, messages, focus_topic,
+        )
         # Optional Jev keep-priority thin (default OFF). On any failure the original
-        # turns_to_summarize is kept and Phase 3 proceeds unchanged.
-        turns_to_summarize = self._maybe_jev_thin_window(turns_to_summarize)
+        # turns_to_summarize is kept and Phase 3 proceeds unchanged. Skipped when
+        # the visibility ladder already projected the window.
+        if not skip_binary_thin:
+            turns_to_summarize = self._maybe_jev_thin_window(turns_to_summarize)
 
         # Phase 3: Generate structured summary (or skip the LLM when the middle is too small to matter)
         feasibility_skip = not force and self._feasibility_skip(telemetry, turns_to_summarize, compress_start, compress_end)
@@ -4752,6 +4840,10 @@ Write only the summary body. Do not include any preamble or prefix."""
                 COMPRESSED_SUMMARY_METADATA_KEY: True,
                 COMPRESSED_SUMMARY_HAS_USER_TURN_KEY: bool(self._summary_has_user_turn),
             })
+        pins = list(getattr(self, "_pending_pin_splice", None) or [])
+        if pins:
+            compressed.extend(self._bridge_pinned_spans(compressed, pins))
+            self._pending_pin_splice = []
         # Default carrier is tail[0]: an exempt row absorbs the summary invisibly. The forced repair
         # path needs a non-empty role=user row, so it targets the template-visible row.
         merge_target_idx = first_tail_visible_idx if force_user_leading and first_tail_visible_idx is not None else 0

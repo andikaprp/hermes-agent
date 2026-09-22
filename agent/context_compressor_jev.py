@@ -107,6 +107,60 @@ def resolve_typesafe_api_key() -> str:
     return _scoped_key_env(TYPESAFE_API_KEY_ENV)
 
 
+# Four visibility levels. Hidden is not sent. The ladder module imports this
+# tuple so the names stay in one place. ``hidden`` means not sent, not deleted.
+VISIBILITY_LEVELS = ("hidden", "short", "long", "full")
+
+# cache_reuse_decision is a deliberate non-adoption and MUST stay false.
+# LAB-52 says "never mutate the cached prefix". AGENTS.md says prompt caching
+# is sacred. Measured steady-state prompt-cache hit rate is about 99 percent.
+# A decision that rewrote the cached prefix to reuse a prior compaction would
+# invalidate that prefix. Parsers coerce any configured value back to false.
+CACHE_REUSE_DECISION = False
+CACHE_REUSE_DECISION_REASON = (
+    'LAB-52 says "never mutate the cached prefix"; AGENTS.md says prompt caching '
+    "is sacred; measured steady-state prompt-cache hit rate is about 99 percent."
+)
+
+# fallback=true reason=below_threshold is a successful decision: Jev answered
+# that it was not confident enough and the unchanged path was kept. Real
+# failures are error, 429, timeout, and missing key.
+_SUCCESS_FALLBACK_REASONS = frozenset({
+    "below_threshold", "disabled", "pins_only", "ok", "applied", "",
+})
+
+
+def parse_cache_reuse_decision(raw: Any) -> bool:
+    """Always false. See CACHE_REUSE_DECISION_REASON."""
+    del raw
+    return False
+
+
+def is_jev_scorer_success(*, fallback: bool, reason: str) -> bool:
+    """Whether a jev_scorer outcome counts as success for measurement.
+
+    ``fallback=true reason=below_threshold`` is success, not failure.
+    """
+    normalized = (reason or "").strip()
+    if normalized == "below_threshold":
+        return True
+    if fallback and normalized not in _SUCCESS_FALLBACK_REASONS:
+        return False
+    return True
+
+
+def _level_char_counts(level_chars: Any) -> Dict[str, int]:
+    counts = {level: 0 for level in VISIBILITY_LEVELS}
+    if isinstance(level_chars, dict):
+        for level in VISIBILITY_LEVELS:
+            raw = level_chars.get(level, 0)
+            try:
+                counts[level] = max(0, int(raw))
+            except (TypeError, ValueError):
+                counts[level] = 0
+    return counts
+
+
 def log_jev_scorer(
     *,
     n_scored: int,
@@ -116,12 +170,30 @@ def log_jev_scorer(
     fallback: bool,
     reason: str = "",
     model: str = "",
+    n_pinned: int = 0,
+    level_chars: Any = None,
 ) -> None:
-    """Single measurable line; mirrors ``gateway/run_turn_fast_lane.log_fast_lane`` style."""
+    """Single measurable line; mirrors ``gateway/run_turn_fast_lane.log_fast_lane`` style.
+
+    ``n_pinned`` is the semantic do-not-shrink pin count. ``level_chars`` is the
+    sent-character breakdown for hidden/short/long/full. ``fallback=true
+    reason=below_threshold`` is success (see ``is_jev_scorer_success``), not a
+    failure. Counts and timings only — never message text.
+    """
+    levels = _level_char_counts(level_chars)
+    try:
+        pinned = max(0, int(n_pinned))
+    except (TypeError, ValueError):
+        pinned = 0
     payload = {
         "marker": JEV_SCORER_MARKER,
         "n_scored": int(n_scored),
         "n_kept": int(n_kept),
+        "n_pinned": pinned,
+        "level_hidden": levels["hidden"],
+        "level_short": levels["short"],
+        "level_long": levels["long"],
+        "level_full": levels["full"],
         "ttft_ms": None if ttft_ms is None else round(float(ttft_ms), 1),
         "ready_ms": None if ready_ms is None else round(float(ready_ms), 1),
         "fallback": bool(fallback),
@@ -131,9 +203,16 @@ def log_jev_scorer(
     logger.info(
         "[latency] "
         + JEV_SCORER_MARKER
-        + " n_scored=%s n_kept=%s ttft_ms=%s ready_ms=%s fallback=%s reason=%s",
+        + " n_scored=%s n_kept=%s n_pinned=%s"
+        + " level_hidden=%s level_short=%s level_long=%s level_full=%s"
+        + " ttft_ms=%s ready_ms=%s fallback=%s reason=%s",
         payload["n_scored"],
         payload["n_kept"],
+        pinned,
+        levels["hidden"],
+        levels["short"],
+        levels["long"],
+        levels["full"],
         payload["ttft_ms"] if payload["ttft_ms"] is not None else "none",
         payload["ready_ms"] if payload["ready_ms"] is not None else "none",
         "true" if fallback else "false",
@@ -153,6 +232,11 @@ def log_jev_scorer(
             content_hash_value="",
             n_scored=n_scored,
             n_kept=n_kept,
+            n_pinned=pinned,
+            level_hidden=levels["hidden"],
+            level_short=levels["short"],
+            level_long=levels["long"],
+            level_full=levels["full"],
             fallback=fallback,
         )
     except Exception:
