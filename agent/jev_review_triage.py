@@ -4,6 +4,12 @@ When ``code_review.jev_triage.enabled`` is true and ``TYPESAFE_API_KEY`` is set,
 grades a review comment set plus PR diff *metadata* into a verdict:
 ``approve`` / ``request-changes`` / ``needs-human``, with confidence.
 
+The GitHub / requesting-code-review flow is skill-driven (no in-process
+reviewer). The runtime hook is ``run_review_triage_hook``, invoked by
+``python -m agent.jev_review_triage --pr N``. It calls ``triage_pr_review``
+only when the gate is on, posts at most one commentary comment, and never
+submits GitHub ``APPROVE``.
+
 Safety contracts (hard):
 - confidence below threshold ALWAYS becomes ``needs-human`` (never auto-approve)
 - missing key / API failure / empty payload -> ``needs-human`` (safe escape)
@@ -17,10 +23,15 @@ add/del counts, comment text, and a bounded diff excerpt — not raw full-file d
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import json
 import logging
+import re
+import subprocess
+import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
@@ -517,3 +528,274 @@ def post_verdict_comment_once(
         body = body.rstrip() + f"\n{VERDICT_COMMENT_MARKER}\n"
     poster(body)
     return {"posted": True, "reason": "ok"}
+
+
+def run_review_triage_hook(
+    payload: ReviewTriageInput,
+    *,
+    existing_bodies: Sequence[str] = (),
+    poster: Optional[Callable[[str], Any]] = None,
+    review_submitter: Optional[Callable[..., Any]] = None,
+    user_config: Any = None,
+    cfg: Optional[JevReviewTriageConfig] = None,
+    http_client: Any = None,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Runtime hook for requesting-code-review / GitHub PR review.
+
+    Disabled (default): does not call ``triage_pr_review``, does not post, and
+    does not submit a review. Enabled: calls ``triage_pr_review``, then posts
+    at most one commentary comment via ``post_verdict_comment_once``.
+
+    ``review_submitter`` is accepted so callers can pass a GitHub review
+    poster, and is never invoked. This layer does not auto-approve: the
+    GitHub event is always ``COMMENT`` (``github_review_event_for``).
+    """
+    del review_submitter  # never submit APPROVE / REQUEST_CHANGES from this seam
+    resolved = cfg if cfg is not None else load_jev_review_triage_config(user_config)
+    if not resolved.enabled:
+        return {
+            "fired": False,
+            "enabled": False,
+            "verdict": None,
+            "confidence": None,
+            "reason": "disabled",
+            "event": None,
+            "posted": False,
+            "post_reason": "disabled",
+            "auto_approved": False,
+        }
+
+    result = triage_pr_review(
+        payload,
+        user_config=user_config,
+        http_client=http_client,
+        api_key=api_key,
+        cfg=resolved,
+    )
+    event = github_review_event_for(result.verdict)
+    if event != "COMMENT":
+        return {
+            "fired": True,
+            "enabled": True,
+            "verdict": result.verdict,
+            "confidence": result.confidence,
+            "reason": result.reason,
+            "event": event,
+            "posted": False,
+            "post_reason": "refused_non_comment",
+            "auto_approved": False,
+        }
+
+    posted = False
+    post_reason = "should_not_post"
+    if result.should_post and poster is not None:
+        status = post_verdict_comment_once(
+            existing_bodies=existing_bodies,
+            body=format_verdict_comment(result, pr_number=payload.pr_number),
+            poster=poster,
+        )
+        posted = bool(status.get("posted"))
+        post_reason = str(status.get("reason") or "")
+    elif result.should_post:
+        post_reason = "no_poster"
+
+    return {
+        "fired": True,
+        "enabled": True,
+        "verdict": result.verdict,
+        "confidence": result.confidence,
+        "reason": result.reason,
+        "event": event,
+        "posted": posted,
+        "post_reason": post_reason,
+        "auto_approved": False,
+    }
+
+
+_GH_VIEW_FIELDS = "number,title,headRefOid,baseRefName,files,comments,reviews"
+_DIFF_HEADER = re.compile(
+    r'^diff --git (?:"a/(.+)"|a/(\S+)) (?:"b/(.+)"|b/(\S+))'
+)
+
+
+def _default_http_client() -> Any:
+    """Override in tests. Production lets ``_post_systemone`` own the client."""
+    return None
+
+
+def patches_by_path(diff_text: str) -> Dict[str, str]:
+    """Split a unified diff into ``b/`` path -> patch text."""
+    out: Dict[str, str] = {}
+    if not diff_text:
+        return out
+    for chunk in re.split(r"(?m)^(?=diff --git )", diff_text):
+        if not chunk.startswith("diff --git "):
+            continue
+        header = chunk.splitlines()[0]
+        match = _DIFF_HEADER.match(header)
+        if not match:
+            continue
+        path = match.group(3) or match.group(4) or ""
+        if path:
+            out[path] = chunk
+    return out
+
+
+def payload_from_gh_view(
+    view: Mapping[str, Any],
+    diff_text: str,
+    *,
+    pr_number: int,
+) -> tuple[ReviewTriageInput, List[str]]:
+    """Build triage input + existing comment bodies from ``gh pr view --json``."""
+    patches = patches_by_path(diff_text)
+    files: List[FileDiffMeta] = []
+    seen: set[str] = set()
+    for raw in view.get("files") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        path = str(raw.get("path") or "")
+        if not path:
+            continue
+        seen.add(path)
+        try:
+            additions = int(raw.get("additions") or 0)
+        except (TypeError, ValueError):
+            additions = 0
+        try:
+            deletions = int(raw.get("deletions") or 0)
+        except (TypeError, ValueError):
+            deletions = 0
+        files.append(
+            file_meta_from_patch(
+                path,
+                patches.get(path, ""),
+                additions=additions,
+                deletions=deletions,
+                status=str(raw.get("changeType") or "modified").lower(),
+            )
+        )
+    for path, patch in patches.items():
+        if path not in seen:
+            files.append(file_meta_from_patch(path, patch))
+
+    comments: List[ReviewComment] = []
+    bodies: List[str] = []
+
+    def _take(body: str, *, path: str = "", severity: str = "") -> None:
+        bodies.append(body)
+        text = (body or "").strip()
+        if not text or VERDICT_COMMENT_MARKER in text:
+            return
+        if len(comments) >= 40:
+            return
+        comments.append(ReviewComment(body=text, path=path, severity=severity))
+
+    for raw in view.get("comments") or []:
+        if isinstance(raw, Mapping):
+            _take(str(raw.get("body") or ""))
+    for raw in view.get("reviews") or []:
+        if isinstance(raw, Mapping):
+            _take(str(raw.get("body") or ""), severity=str(raw.get("state") or ""))
+
+    number = pr_number
+    try:
+        if view.get("number") is not None:
+            number = int(view["number"])
+    except (TypeError, ValueError):
+        number = pr_number
+    payload = ReviewTriageInput(
+        pr_number=number,
+        title=str(view.get("title") or ""),
+        head_sha=str(view.get("headRefOid") or ""),
+        base_ref=str(view.get("baseRefName") or ""),
+        files=files,
+        comments=comments,
+        diff_excerpt=diff_text or "",
+    )
+    return payload, bodies
+
+
+def _run_gh(args: Sequence[str]) -> str:
+    proc = subprocess.run(
+        list(args),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "gh failed").strip()
+        raise RuntimeError(err)
+    return proc.stdout
+
+
+def main(
+    argv: Optional[Sequence[str]] = None,
+    *,
+    gh_runner: Optional[Callable[[Sequence[str]], str]] = None,
+    user_config: Any = None,
+) -> int:
+    """``python -m agent.jev_review_triage --pr N``.
+
+    No-op when ``code_review.jev_triage.enabled`` is false (does not call gh).
+    When enabled, fetches PR metadata, calls ``run_review_triage_hook``, and
+    posts at most one ``gh pr comment``. Never runs ``gh pr review --approve``.
+    """
+    parser = argparse.ArgumentParser(prog="python -m agent.jev_review_triage")
+    parser.add_argument("--pr", type=int, required=True)
+    parser.add_argument(
+        "--repo",
+        default="",
+        help="owner/repo passed to gh -R (default: repo of the current checkout)",
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    cfg = load_jev_review_triage_config(user_config)
+    if not cfg.enabled:
+        print("jev triage disabled")
+        return 0
+
+    runner = gh_runner or _run_gh
+    repo_args = ["-R", args.repo] if args.repo else []
+    try:
+        view_raw = runner(
+            ["gh", "pr", "view", str(args.pr), *repo_args, "--json", _GH_VIEW_FIELDS]
+        )
+        diff_text = runner(["gh", "pr", "diff", str(args.pr), *repo_args])
+        view = json.loads(view_raw)
+    except (OSError, RuntimeError, json.JSONDecodeError, TypeError) as exc:
+        print(f"jev triage: failed to read PR #{args.pr}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(view, dict):
+        print(f"jev triage: unexpected gh pr view payload for #{args.pr}", file=sys.stderr)
+        return 1
+
+    payload, bodies = payload_from_gh_view(view, diff_text, pr_number=args.pr)
+
+    def _poster(body: str) -> None:
+        runner(["gh", "pr", "comment", str(args.pr), *repo_args, "--body", body])
+
+    try:
+        result = run_review_triage_hook(
+            payload,
+            existing_bodies=bodies,
+            poster=_poster,
+            cfg=cfg,
+            http_client=_default_http_client(),
+        )
+    except Exception as exc:
+        print(f"jev triage: hook failed for PR #{args.pr}: {exc}", file=sys.stderr)
+        return 1
+
+    confidence = result.get("confidence")
+    conf = f"{confidence:.2f}" if isinstance(confidence, float) else "n/a"
+    print(
+        f"{result.get('verdict')} {conf} posted={result.get('posted')} "
+        f"event={result.get('event')}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

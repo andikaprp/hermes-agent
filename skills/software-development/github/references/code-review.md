@@ -426,52 +426,15 @@ curl -s -X POST \
 
 ### Step 7b (optional): Jev review triage
 
-When `code_review.jev_triage.enabled` is true in config.yaml (and `TYPESAFE_API_KEY` is set),
-run native Jev triage over **diff metadata + review comments** before the formal verdict.
-Low confidence always becomes `needs-human`; this seam never auto-approves and never
-submits a GitHub `APPROVE` event — it posts **at most one** commentary comment per PR
-(marker-deduped). It does not replace the human review gate.
+When `code_review.jev_triage.enabled` is true (default **off**) and `TYPESAFE_API_KEY` is set, run the runtime hook. Do not paste the triage helpers inline — the review flow is skill-driven, and this command is the call path (`run_review_triage_hook` in `agent/jev_review_triage.py`).
 
 ```bash
-# From the Hermes checkout (agent imports resolve via PYTHONPATH=.)
-PYTHONPATH=. python - <<'PY'
-from agent.jev_review_triage import (
-    FileDiffMeta, ReviewComment, ReviewTriageInput,
-    comment_already_posted, format_verdict_comment,
-    github_review_event_for, load_jev_review_triage_config,
-    post_verdict_comment_once, triage_pr_review,
-)
-import json, subprocess
-
-cfg = load_jev_review_triage_config()
-if not cfg.enabled:
-    raise SystemExit("jev triage disabled")
-
-pr = int("$PR_NUMBER")  # substitute
-# Prefer file metadata (path + patch hash + churn) over dumping whole files.
-files = [FileDiffMeta(path="src/auth.py", patch_sha256="abc", additions=12, deletions=3)]
-comments = [ReviewComment(body="🔴 Critical: …", path="src/auth.py", line=45, severity="critical")]
-payload = ReviewTriageInput(
-    pr_number=pr, title="…", head_sha="…", files=files, comments=comments,
-    diff_excerpt=subprocess.check_output(["gh","pr","diff",str(pr)], text=True)[:12000],
-)
-result = triage_pr_review(payload)
-assert github_review_event_for(result.verdict) == "COMMENT"
-# One comment max — skip if marker already present
-existing = json.loads(subprocess.check_output(
-    ["gh","pr","view",str(pr),"--comments","--json","comments"], text=True)).get("comments") or []
-bodies = [c.get("body","") for c in existing]
-post_verdict_comment_once(
-    existing_bodies=bodies,
-    body=format_verdict_comment(result, pr_number=pr),
-    poster=lambda body: subprocess.check_call(["gh","pr","comment",str(pr),"--body",body]),
-)
-print(result.verdict, result.confidence, result.reason)
-PY
+# From the Hermes checkout. No-op when the gate is off (does not call gh).
+# Calls triage_pr_review, posts at most one COMMENT per PR, never auto-approves.
+PYTHONPATH=. python -m agent.jev_review_triage --pr "$PR_NUMBER"
 ```
 
-Only after triage (or when triage is disabled) proceed to formal `gh pr review`
-approve / request-changes — that remains a human-gated or explicit skill action.
+Low confidence becomes `needs-human`. The hook never submits a GitHub `APPROVE` review. It does not replace the human review gate. Only after this hook (or when it prints `jev triage disabled`) proceed to formal `gh pr review` approve / request-changes — that remains a human-gated or explicit skill action.
 
 ### Step 8: Also post a summary comment
 
