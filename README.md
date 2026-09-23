@@ -247,6 +247,17 @@ scripts/run_tests.sh
 
 ---
 
+## Jev decision store
+
+jev-decisions.jsonl is the decision store for native Jev observability
+(`gateway.jev_observability`, default off). It lives at `logs/jev-decisions.jsonl`.
+The dashboard GET routes (`/api/jev/decisions`, `/api/jev/observability`) are a
+read-only local view of that file and the in-process ring. They do not tail
+`gateway.log`, and nothing is sent off-box. The file rotates with stdlib
+max-bytes rollover to `.1`.
+
+---
+
 ## Community
 
 - 💬 [Discord](https://discord.gg/NousResearch)

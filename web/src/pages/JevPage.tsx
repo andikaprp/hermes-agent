@@ -95,8 +95,8 @@ export default function JevPage() {
         <p className="text-sm text-muted-foreground">
           Observability is off. Set{" "}
           <code>gateway.jev_observability.mode</code> to <code>shadow</code> or{" "}
-          <code>on</code> in config.yaml (default off). Decisions are written only to local{" "}
-          <code>logs/jev-decisions.jsonl</code> — nothing is sent off-box.
+          <code>on</code> in config.yaml (default off). <code>logs/jev-decisions.jsonl</code> is
+          the decision store. This page is a read-only local view — nothing is sent off-box.
         </p>
       ) : (
         <div className="overflow-auto border border-border">

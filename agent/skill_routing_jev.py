@@ -21,7 +21,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
-from agent.jev_payload_hygiene import content_hash, mask_state_text
+from agent.jev_payload_hygiene import content_hash, text_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -190,19 +190,18 @@ def build_jev_skill_routing_request(
     *,
     model: str = DEFAULT_JEV_MODEL,
 ) -> dict:
-    """System One choice request: inbound task + skill criteria."""
+    """System One choice request: hash/metadata for the task, skill ids as criteria."""
     criteria: Dict[str, str] = {
         c.skill_id: c.criteria_text() for c in candidates
     }
     criteria[NONE_CHOICE] = "No listed skill clearly applies to this task"
-    text = mask_state_text(task_text or "", limit=480)
     return {
         "model": model,
         "state": [
             "Hermes session-setup skill selection. Pick the one skill whose "
             "instructions should be fully loaded into the system prompt for "
-            "this new session, or none.",
-            f"Inbound task:\n{text}",
+            "this new session, or none. The inbound task is hash/metadata only.",
+            text_metadata(task_text or "", label="Inbound task"),
         ],
         "questions": {
             SKILL_QUESTION_ID: {

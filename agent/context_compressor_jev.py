@@ -270,34 +270,47 @@ def _content_as_text(content: Any) -> str:
 
 
 def message_to_state_text(msg: Dict[str, Any]) -> str:
-    """Flatten one OpenAI-shaped message into a single text state entry for Jev."""
-    from agent.jev_payload_hygiene import mask_state_text, tool_result_metadata
+    """Flatten one message into hash/metadata. No prompt text or tool payloads."""
+    from agent.jev_payload_hygiene import safe_ident, text_metadata, tool_result_metadata
 
     role = str(msg.get("role") or "unknown")
+    safe_role = safe_ident(role, limit=32) or "unknown"
     text = _content_as_text(msg.get("content")).strip()
+    if role == "tool":
+        tid = msg.get("tool_call_id") or ""
+        return tool_result_metadata(text, tool_call_id=str(tid))
+    extra_flags: List[str] = []
+    extra_counts: Dict[str, int] = {}
+    arg_metas: List[str] = []
+    names: List[str] = []
     if role == "assistant" and msg.get("tool_calls"):
-        calls = []
         for tc in msg.get("tool_calls") or []:
             if not isinstance(tc, dict):
                 continue
-            fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
-            name = fn.get("name") or tc.get("name") or "?"
+            raw_fn = tc.get("function")
+            fn: Dict[str, Any] = raw_fn if isinstance(raw_fn, dict) else {}
+            name = safe_ident(fn.get("name") or tc.get("name") or "")
+            if name:
+                names.append(name)
             args = fn.get("arguments") or ""
             if isinstance(args, (dict, list)):
                 try:
                     args = json.dumps(args, ensure_ascii=False)
                 except (TypeError, ValueError):
                     args = str(args)
-            args_s = str(args)
-            if len(args_s) > 400:
-                args_s = args_s[:400] + "..."
-            calls.append(f"{name}({args_s})")
-        call_block = "; ".join(calls)
-        text = f"{text}\n[tool_calls: {call_block}]".strip() if text else f"[tool_calls: {call_block}]"
-    if role == "tool":
-        tid = msg.get("tool_call_id") or ""
-        return tool_result_metadata(text, tool_call_id=str(tid))
-    return f"[{role}] {mask_state_text(text, limit=2000)}".strip()
+            arg_metas.append(text_metadata(str(args), label="tool_call_args"))
+        extra_flags.append("has_tool_calls")
+        extra_counts["tool_calls"] = len(arg_metas)
+    meta = text_metadata(
+        text,
+        label=f"[{safe_role}]",
+        extra_flags=extra_flags,
+        extra_counts=extra_counts,
+    )
+    if not arg_metas:
+        return meta
+    name_meta = ",".join(names) if names else "-"
+    return f"{meta} tools={name_meta} " + " ".join(arg_metas)
 
 
 def _question_for_index(index: int) -> Dict[str, Any]:

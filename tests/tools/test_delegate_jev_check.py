@@ -55,8 +55,10 @@ class TestJevCheckConfigDefaults:
         assert "delegate" in body["questions"]["route"]["criteria"]
         assert "do_directly" in body["questions"]["route"]["criteria"]
         assert body["questions"]["route"]["type"] == "choice"
-        assert "auth bug" in body["state"]
-        assert "parent notes" in body["state"]
+        assert "auth bug" not in body["state"]
+        assert "parent notes" not in body["state"]
+        assert "hash=" in body["state"]
+        assert "task_count=" in body["state"]
         choice, conf = parse_choice_answer(_choice_payload("do_directly", 0.91))
         assert choice == "do_directly"
         assert conf == pytest.approx(0.91)

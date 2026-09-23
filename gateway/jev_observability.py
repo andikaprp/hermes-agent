@@ -1,9 +1,15 @@
 """Config-gated local Jev decision observability (LAB-59).
 
-Records decision metadata from existing ``log_jev_*`` / quality-gate hooks into
-``<hermes_home>/logs/jev-decisions.jsonl`` plus an in-process ring. Never stores
-prompt text or tool results — hashes and routing metadata only. Nothing is sent
-off-box; the dashboard/export only reads this local state.
+``<hermes_home>/logs/jev-decisions.jsonl`` is THE decision store (plus an
+in-process ring of the same rows). ``log_jev_*`` lines are diagnostic logs,
+not a second store — this module does not tail gateway.log. The dashboard
+GET routes are a read-only local view of this store. Nothing is sent
+off-box.
+
+The jsonl uses stdlib ``RotatingFileHandler`` semantics: when the next line
+would exceed ``DECISIONS_MAX_BYTES``, the current file rolls to
+``jev-decisions.jsonl.1`` (backupCount=1). ``maxBytes == 0`` disables
+rollover, matching the stdlib handler.
 
 Modes (``gateway.jev_observability.mode``), default ``off``:
 
@@ -22,6 +28,8 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
@@ -30,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 CONFIG_KEY = "gateway.jev_observability"
 DECISIONS_FILENAME = "jev-decisions.jsonl"
+# Stdlib RotatingFileHandler: 0 disables rollover. backupCount=1 -> ``.1`` only.
+DECISIONS_MAX_BYTES = 1_048_576
+DECISIONS_BACKUP_COUNT = 1
 DEFAULT_LIMIT = 200
 VALID_MODES = frozenset({"off", "shadow", "on"})
 
@@ -90,7 +101,46 @@ def content_hash(text: Any, *, n: int = 16) -> str:
 
 def decisions_path() -> Any:
     """Profile-aware jsonl path; resolved at call time."""
-    return get_hermes_home() / "logs" / DECISIONS_FILENAME
+    return Path(get_hermes_home()) / "logs" / DECISIONS_FILENAME
+
+
+def _rollover_if_needed(path: Path, incoming: int, max_bytes: int) -> None:
+    """Rename ``path`` to ``path.1`` using stdlib RotatingFileHandler (backupCount=1).
+
+    Matches ``shouldRollover``: never roll an empty/missing file; roll when
+    ``size + incoming >= maxBytes``. A single record may exceed the cap.
+    """
+    if max_bytes <= 0:
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= 0 or size + incoming < max_bytes:
+        return
+    handler = RotatingFileHandler(
+        str(path),
+        maxBytes=max_bytes,
+        backupCount=DECISIONS_BACKUP_COUNT,
+        delay=True,
+    )
+    try:
+        handler.doRollover()
+    finally:
+        handler.close()
+
+
+def _append_decision_line(path: Path, line: str, *, max_bytes: int | None = None) -> None:
+    cap = DECISIONS_MAX_BYTES if max_bytes is None else max_bytes
+    payload = line if line.endswith("\n") else line + "\n"
+    data = payload.encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _rollover_if_needed(path, len(data), cap)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 def _ensure_ring_capacity(limit: int) -> None:
@@ -150,11 +200,8 @@ def record_jev_decision(
                 entry[key] = list(value)[:32]
         with _LOCK:
             _RING.append(entry)
-            path = decisions_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-            with os.fdopen(fd, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
+            line = json.dumps(entry, separators=(",", ":"), default=str)
+            _append_decision_line(decisions_path(), line)
         return entry
     except Exception as exc:  # pragma: no cover - observability must never break a turn
         logger.debug("jev observability record failed: %s", exc)

@@ -1,7 +1,8 @@
 """Dashboard routes for native Jev decision observability (LAB-59).
 
-Reads local ``logs/jev-decisions.jsonl`` / in-process ring only — no outbound
-telemetry. Config gate: ``gateway.jev_observability.mode`` (off|shadow|on).
+Read-only local view of THE decision store (``logs/jev-decisions.jsonl``
+and the in-process ring). Does not tail gateway.log and sends nothing
+off-box. Config gate: ``gateway.jev_observability.mode`` (off|shadow|on).
 """
 
 from __future__ import annotations

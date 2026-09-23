@@ -165,11 +165,15 @@ class TestJevObservabilityRecording:
 
 
 class TestJevPayloadHygiene:
-    def test_routing_request_masks_secrets_and_truncates(self):
-        body = build_jev_routing_request("hi sk-abcdefghijklmnopqrstuvwxyz " + ("x" * 500))
+    def test_routing_request_is_hash_metadata_only(self):
+        secret = "hi «redacted:sk-…» " + ("x" * 500)
+        body = build_jev_routing_request(secret)
         state = "\n".join(body["state"])
-        assert "sk-abcdefghijklmnopqrstuvwxyz" not in state
-        assert "[secret]" in state
+        assert "«redacted:sk-…" not in state
+        assert "[secret]" not in state
+        assert "x" * 40 not in state
+        assert f"hash={content_hash(secret)}" in state
+        assert "chars=" in state
         assert len(state) < 900
 
     def test_tool_results_are_hash_metadata_only(self):
