@@ -38,6 +38,19 @@ runtime:
   nofile_soft_limit: 4096
 
 # =============================================================================
+# Jev (TypeSafe System One) transport
+# =============================================================================
+# Shared keep-alive client and exact-repeat decision cache. Default on.
+# Set enabled: false or ttl_seconds: 0 to disable. Per-surface timeout_seconds
+# budgets are documented in the README (routing 4s, quality gate 1.5s, memory
+# / skill / delegate 5s, completion 10s, review triage 15s).
+# jev:
+#   decision_cache:
+#     enabled: true
+#     ttl_seconds: 3600
+#     max_entries: 512
+
+# =============================================================================
 # Model Configuration
 # =============================================================================
 model:
@@ -1737,7 +1750,7 @@ delegation:
   #   enabled: false
   #   threshold: 0.8
   #   model: jev-latest
-  #   timeout_seconds: 30
+  #   timeout_seconds: 5
 
 # =============================================================================
 # Honcho Integration (Cross-Session User Modeling)

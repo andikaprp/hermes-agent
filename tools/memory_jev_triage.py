@@ -15,7 +15,6 @@ from typing import Any, Optional
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
-    DEFAULT_TIMEOUT_SECONDS,
     _post_systemone,
     resolve_typesafe_api_key,
 )
@@ -26,6 +25,7 @@ logger = logging.getLogger(__name__)
 JEV_MEMORY_TRIAGE_MARKER = "jev_memory_triage"
 CONFIG_KEY = "memory.jev_triage"
 DEFAULT_THRESHOLD = 0.75
+DEFAULT_TIMEOUT_SECONDS = 5.0
 # Cheap pre-filter: skip Jev for short session-noise-sized strings.
 DEFAULT_MIN_CHARS = 40
 QUESTION_ID = "durable"

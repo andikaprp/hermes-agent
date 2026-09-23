@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
-    DEFAULT_TIMEOUT_SECONDS,
     _post_systemone,
     resolve_typesafe_api_key,
 )
@@ -26,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 JEV_DELEGATE_MARKER = "jev_delegate"
 DEFAULT_THRESHOLD = 0.8
+DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_BEHAVIOR = "delegate"  # current hermes default: always spawn
 
 CHOICE_INSTRUCTIONS = (

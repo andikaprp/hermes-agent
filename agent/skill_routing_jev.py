@@ -17,7 +17,6 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
-    DEFAULT_TIMEOUT_SECONDS,
     _post_systemone,
     resolve_typesafe_api_key,
 )
@@ -28,6 +27,7 @@ logger = logging.getLogger(__name__)
 JEV_SKILL_ROUTE_MARKER = "jev_skill_route"
 CONFIG_KEY = "agent.skill_routing"
 DEFAULT_THRESHOLD = 0.85
+DEFAULT_TIMEOUT_SECONDS = 5.0
 DEFAULT_MAX_CANDIDATES = 40
 SKILL_QUESTION_ID = "skill"
 NONE_CHOICE = "none"

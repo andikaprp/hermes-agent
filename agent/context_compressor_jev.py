@@ -505,7 +505,20 @@ def _post_systemone(
     timeout_seconds: float,
     http_client: Any = None,
 ) -> tuple[Any, float, float]:
-    """POST one System One request. Returns (json, ttft_ms, ready_ms)."""
+    """POST one System One request. Returns (json, ttft_ms, ready_ms).
+
+    Production calls (no injected client, no env proxy) share one keep-alive
+    HTTPS connection. An injected client, or an env proxy, keeps the fresh
+    httpx path so tests and proxy users are unchanged.
+    """
+    if http_client is None:
+        from agent.jev_transport import _env_proxy_set, post_systemone
+
+        if not _env_proxy_set():
+            return post_systemone(
+                body, api_key=api_key, timeout_seconds=timeout_seconds,
+            )
+
     import httpx
 
     headers = {

@@ -16,7 +16,6 @@ from typing import Any, Optional, Sequence, Tuple
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
-    DEFAULT_TIMEOUT_SECONDS,
     _post_systemone,
     resolve_typesafe_api_key,
 )
@@ -29,6 +28,8 @@ logger = logging.getLogger("gateway.run_turn")
 JEV_ROUTING_MARKER = "jev_routing"
 CONFIG_KEY = "gateway.telegram.jev_routing"
 DEFAULT_THRESHOLD = 0.85
+# Hot-path second opinion. 30s stalled the turn; 4s is the budget.
+DEFAULT_TIMEOUT_SECONDS = 4.0
 ROUTE_QUESTION_ID = "route"
 
 # Wording used in the PR description / tests — keep stable.
