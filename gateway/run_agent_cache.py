@@ -375,7 +375,9 @@ class GatewayAgentCacheMixin:
             state.persistent.approvals = None
             state.persistent.update_prompt_pending = False
         for mod, attr, what in (
-            ("tools.slash_confirm", "clear", "slash-confirm"), ("tools.approval", "clear_session", "approval"),
+            ("tools.slash_confirm", "clear", "slash-confirm"),
+            ("tools.approval", "clear_session", "approval"),
+            ("gateway.jev_completion_hitl", "clear_pending_ask", "completion-hitl"),
         ):
             try:
                 clear = getattr(importlib.import_module(mod), attr)

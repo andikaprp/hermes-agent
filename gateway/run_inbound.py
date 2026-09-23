@@ -1182,6 +1182,42 @@ class GatewayInboundMixin:
             logger.debug("Skill command check failed (non-fatal): %s", e)
         return None
 
+    async def _hm_completion_hitl_reply(
+        self, event: "MessageEvent", source: SessionSource, session_key: str
+    ) -> Optional[str]:
+        """Answer a pending Jev completion ask (``tools.clarify_gateway`` seam).
+
+        Confirm / not-done return an ack and do not start a new turn. A
+        correction releases the ask and falls through (None) so the text is
+        the follow-up. No pending ask also returns None.
+        """
+        try:
+            from gateway.jev_completion_hitl import (
+                has_pending_ask,
+                intercept_completion_reply,
+            )
+        except Exception:
+            logger.debug("completion HITL intercept unavailable", exc_info=True)
+            return None
+        if not has_pending_ask(session_key):
+            return None
+        text = (getattr(event, "text", None) or "").strip()
+        if self._pending_event_audio_paths(event):
+            text = await self._prepare_clarify_reply_text(event)
+            if not text:
+                return ""
+        outcome = intercept_completion_reply(session_key, text)
+        if outcome is None:
+            return None
+        if outcome.action == "ack":
+            logger.info(
+                "completion HITL reply handled platform=%s action=ack",
+                getattr(getattr(source, "platform", None), "value", None)
+                or getattr(source, "platform", None),
+            )
+            return outcome.text
+        return None
+
     async def _hm_pending_reply_intercepts(
         self, event: "MessageEvent", source: SessionSource, _quick_key: str
     ) -> Optional[str]:
@@ -1189,7 +1225,9 @@ class GatewayInboundMixin:
         Only events that may control the gateway (``allow_gateway_control``) can answer them."""
         if not event.allow_gateway_control:
             return None
-        _reply = self._hm_update_prompt_reply(event, _quick_key)
+        _reply = await self._hm_completion_hitl_reply(event, source, _quick_key)
+        if _reply is None:
+            _reply = self._hm_update_prompt_reply(event, _quick_key)
         if _reply is None:
             _reply = await self._hm_clarify_reply(event, source, _quick_key)
         if _reply is None:
