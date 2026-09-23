@@ -1270,6 +1270,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
 # ---------------------------------------------------------------------------
 from tools.registry import registry, tool_error
 from tools.browser_extension_router import extension_controller_available, routed_browser_handler
+from gateway.jev_action_gate import schema_override_fn
 
 _BROWSER_SCHEMA_MAP = {s["name"]: s for s in BROWSER_TOOL_SCHEMAS}
 
@@ -1328,7 +1329,8 @@ for _name, _emoji, _check_fn, _defaults, *_extra in _BROWSER_TOOL_TABLE:
         _check_fn = globals()[f"check_{_name}_requirements"] = _routed_check_fn(_name)
     registry.register(name=_name, toolset="browser", schema=_BROWSER_SCHEMA_MAP[_name],
                       handler=_routed_handler(_name, _fallback_call(_name, _defaults, *_extra)),
-                      check_fn=_check_fn, emoji=_emoji)
+                      check_fn=_check_fn, emoji=_emoji,
+                      dynamic_schema_overrides=schema_override_fn("browser", _BROWSER_SCHEMA_MAP[_name]))
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

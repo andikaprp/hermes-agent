@@ -433,8 +433,12 @@ DEFAULT_CONFIG = {
         # is the legacy override that bypasses that denylist entirely.
         "allow_unsafe_evaluate": False,
         "restrict_evaluate": False,
-        # Optional TypeSafe Jev action gate (LAB-60): same withheld-context contract as
-        # computer_use.jev_action_gate. OFF by default; fail-open to reobserve.
+        # Optional TypeSafe Jev action gate (LAB-60). OFF by default: disabled
+        # means computer/browser tools are unchanged (no Jev call). When enabled,
+        # a mutating action does not execute unless Jev returns its approved
+        # action id; errors/timeouts/low confidence/missing key reobserve and
+        # the tool call does not run. Chosen actions still pass existing approval
+        # / risk gates.
         "jev_action_gate": {
             "enabled": False,
             "threshold": 0.65,
@@ -2479,9 +2483,11 @@ DEFAULT_CONFIG = {
         # development from source.
         "allow_unsigned_driver": False,
         # Optional TypeSafe Jev action gate (LAB-60): pick next computer-use action from a
-        # pre-approved table with withheld context (goal + short labels only). OFF by default;
-        # errors/timeouts/low confidence fail open to reobserve. Complements existing approval
-        # / risk gates — chosen actions still pass them on execute.
+        # pre-approved table with withheld context (goal + short labels only). OFF by
+        # default — disabled means no Jev call and today's execution path. When enabled,
+        # a mutating action does not execute unless Jev returns that action id;
+        # errors/timeouts/low confidence/missing key reobserve and the call does not
+        # run. Complements existing approval / risk gates, which still run after.
         "jev_action_gate": {
             "enabled": False,
             "threshold": 0.65,
