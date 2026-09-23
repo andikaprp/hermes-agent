@@ -213,7 +213,11 @@ def test_try_fast_lane_falls_back_on_provider_error(caplog):
         )
     assert result is None
     assert "fallback=true" in caplog.text
-    assert "42" not in caplog.text
+    # The latency line redacts chat_id. Assert the raw id is not the chat=
+    # field — a digest can still contain the digits "42" as a substring
+    # (observed: chat=c442cf34b1101), which made `assert "42" not in text` flake.
+    assert "chat=42" not in caplog.text
+    assert "chat=" in caplog.text
 
 
 def test_try_fast_lane_falls_back_on_ttft_budget():
