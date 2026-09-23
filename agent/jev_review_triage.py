@@ -35,7 +35,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
-    DEFAULT_TIMEOUT_SECONDS,
     TRUNCATE_INDICATOR,
     _post_systemone,
     resolve_typesafe_api_key,
@@ -48,6 +47,8 @@ VERDICT_COMMENT_MARKER = "<!-- hermes-jev-review-triage -->"
 CONFIG_KEY = "code_review.jev_triage"
 DEFAULT_THRESHOLD = 0.85
 DEFAULT_MAX_DIFF_CHARS = 12_000
+# Off the turn hot path, but 30s was unbounded for a review hook.
+DEFAULT_TIMEOUT_SECONDS = 15.0
 VERDICT_QUESTION_ID = "verdict"
 
 VERDICTS = ("approve", "request-changes", "needs-human")

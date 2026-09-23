@@ -21,7 +21,6 @@ from typing import Any, Optional
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
-    DEFAULT_TIMEOUT_SECONDS,
     _post_systemone,
     resolve_typesafe_api_key,
 )
@@ -32,6 +31,8 @@ logger = logging.getLogger("gateway.run_turn")
 JEV_COMPLETION_MARKER = "jev_completion"
 CONFIG_KEY = "gateway.jev_completion"
 DEFAULT_THRESHOLD = 0.75
+# Post-turn. 10s bounds the check without the old 30s stall.
+DEFAULT_TIMEOUT_SECONDS = 10.0
 COMPLETION_QUESTION_ID = "completion"
 HITL_NOTICE = (
     "⚠️ Completion check needs a human look before this turn is marked done "

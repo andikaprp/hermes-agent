@@ -34,6 +34,16 @@ DEFAULT_CONFIG = {
     },
     # Soft fd limit for long-running server processes; clamped to OS hard limit. 0/false/null = off.
     "runtime": {"nofile_soft_limit": 4096},
+    # Shared System One transport. decision_cache is exact-repeat only
+    # (content hash + question spec). Default on; set enabled false or
+    # ttl_seconds 0 to disable. No new environment variables.
+    "jev": {
+        "decision_cache": {
+            "enabled": True,
+            "ttl_seconds": 3600,
+            "max_entries": 512,
+        },
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging. None/0 = unbounded.
     "max_concurrent_sessions": None,
     # Soft LRU cap on in-memory TUI/desktop/dashboard sessions. Above it the gateway evicts the
@@ -262,7 +272,7 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "threshold": 0.85,
             "model": "jev-latest",
-            "timeout_seconds": 30,
+            "timeout_seconds": 5,
         },
     },
 
@@ -1292,7 +1302,7 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "threshold": 0.75,
             "model": "jev-latest",
-            "timeout_seconds": 30,
+            "timeout_seconds": 5,
             # Skip the ~0.5–1s Jev call for short entries (hot path stays cheap).
             "min_chars": 40,
         },
@@ -1307,7 +1317,7 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "threshold": 0.85,
             "model": "jev-latest",
-            "timeout_seconds": 30,
+            "timeout_seconds": 15,
             # Bound the raw diff excerpt in Jev state (hashes/metadata carry the rest).
             "max_diff_chars": 12000,
         },
@@ -1383,7 +1393,7 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "threshold": 0.8,
             "model": "jev-latest",
-            "timeout_seconds": 30,
+            "timeout_seconds": 5,
         },
     },
     # Ephemeral prefill messages file — JSON list of {role, content} dicts injected at the start of
@@ -2044,7 +2054,7 @@ DEFAULT_CONFIG = {
             "enabled": False,
             "threshold": 0.75,
             "model": "jev-latest",
-            "timeout_seconds": 30,
+            "timeout_seconds": 10,
         },
         # Seconds to wait for one platform to connect at startup/reconnect; raise on "discord
         # connect timed out" loops (many slash commands to sync). 0/negative = wait forever. Bridged
@@ -2160,7 +2170,7 @@ DEFAULT_CONFIG = {
                 "enabled": False,
                 "threshold": 0.85,
                 "model": "jev-latest",
-                "timeout_seconds": 30,
+                "timeout_seconds": 4,
                 "verdict_cache_ttl_seconds": 0,
                 "breaker_trips": 3,
                 "breaker_cooldown_seconds": 30,
