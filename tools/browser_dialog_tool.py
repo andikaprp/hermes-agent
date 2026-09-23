@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from tools.browser_supervisor import SUPERVISOR_REGISTRY
 from tools.registry import registry
+from gateway.jev_action_gate import schema_override_fn
 
 BROWSER_DIALOG_SCHEMA: Dict[str, Any] = {
     "name": "browser_dialog",
@@ -105,6 +106,7 @@ registry.register(
     handler=lambda args, **kw: browser_dialog(action=args.get("action", ""), prompt_text=args.get("prompt_text"),
                                               dialog_id=args.get("dialog_id"), task_id=kw.get("task_id")),
     check_fn=_browser_dialog_check,
+    dynamic_schema_overrides=schema_override_fn("browser", BROWSER_DIALOG_SCHEMA),
     emoji="💬",
 )
 

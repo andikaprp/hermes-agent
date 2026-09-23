@@ -849,6 +849,12 @@ class ToolRegistry:
         if not entry:
             return tool_error(f"Unknown tool: {name}")
         try:
+            if name == "computer_use" or (isinstance(name, str) and name.startswith("browser")):
+                # Disabled gate: prepare returns the same args and does not call Jev.
+                from gateway.jev_action_gate import prepare_gated_execution
+                block, args = prepare_gated_execution(name, args)
+                if block is not None:
+                    return block
             if entry.is_async:
                 from model_tools import _run_async
                 result = _run_async(entry.handler(args, **kwargs))

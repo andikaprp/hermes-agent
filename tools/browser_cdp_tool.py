@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 from tools.registry import registry, tool_error
 from tools.browser_extension_router import routed_browser_handler
+from gateway.jev_action_gate import schema_override_fn
 
 logger = logging.getLogger(__name__)
 
@@ -405,5 +406,6 @@ registry.register(
         task_id=kw.get("task_id"), session_id=kw.get("session_id"),
     ),
     check_fn=_browser_cdp_check,
+    dynamic_schema_overrides=schema_override_fn("browser", BROWSER_CDP_SCHEMA),
     emoji="🧪",
 )

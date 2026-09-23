@@ -2,9 +2,10 @@
 
 Appears when ``computer_use.jev_action_gate.enabled`` or
 ``browser.jev_action_gate.enabled`` is true. Returns an action id from the
-caller-supplied pre-approved table (or ``reobserve`` / ``none``). Never
-executes the action — the agent still calls computer_use / browser tools,
-which keep their existing approval and risk gates (LAB-55 complement).
+caller-supplied pre-approved table (or ``reobserve`` / ``none``). Does not
+execute the action itself. When the gate is enabled, the computer_use /
+browser tool call must pass that id as ``jev_action_id`` or it will not run.
+Existing approval and risk gates still apply after that check.
 """
 
 from __future__ import annotations
@@ -29,8 +30,10 @@ JEV_CHOOSE_ACTION_SCHEMA = {
         "Pass only a goal, short element labels, and a table of safe actions "
         "(must include reobserve and none). Never pass screenshots, page text, "
         "or field values — those are refused. Returns one action id from the "
-        "table, or reobserve on error/timeout/low confidence. Does not execute "
-        "the action; consequential actions still go through normal approval gates."
+        "table, or reobserve on error/timeout/low confidence. Pass that id as "
+        "jev_action_id on the computer_use or browser call, with the same "
+        "candidate table: while the gate is enabled the tool does not execute "
+        "unless Jev approves it. Approval gates still apply after that."
     ),
     "parameters": {
         "type": "object",

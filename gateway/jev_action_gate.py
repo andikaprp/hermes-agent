@@ -7,12 +7,17 @@ looks sensitive is refused before the API call.
 
 Jev can only ever return an action id from that table (which must include
 ``reobserve`` and ``none``). Errors, timeouts, missing keys, and low confidence
-fail open to ``reobserve`` so a Jev outage never blocks computer/browser use.
+return ``reobserve``.
 
-Complements the LAB-55 tool-call risk-gate pattern: choosing an id here does
-not bypass existing consequential-action approval / risk gates on the
-computer_use and browser tool paths — those still run when the chosen action
-is executed.
+When the matching surface gate is enabled, tool dispatch translates that into
+execute-time enforcement: a mutating computer-use or browser action does not
+run unless Jev returns the caller-supplied action id from the approved table.
+``reobserve`` / ``none`` / any fallback means the tool call does not execute.
+Choosing an id does not bypass existing consequential-action approval / risk
+gates — those still run after this check passes.
+
+When the gate is disabled (the default), dispatch does not call this module
+and the tool path is unchanged.
 
 Config (OFF by default), mirrored under both surfaces:
 
@@ -22,13 +27,14 @@ Config (OFF by default), mirrored under both surfaces:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from agent.context_compressor_jev import (
     DEFAULT_JEV_MODEL,
@@ -568,3 +574,226 @@ def decision_payload(decision: JevActionDecision) -> Dict[str, Any]:
         "reobserve": decision.action_id == REOBSERVE_ID,
         "none": decision.action_id == NONE_ID,
     }
+
+
+# Mutating computer-use actions. Observation (capture / list_*) and wait are
+# not in the approved-action table and must stay executable so the agent can
+# reobserve without a Jev round trip.
+GATED_COMPUTER_ACTIONS = frozenset({
+    "click",
+    "double_click",
+    "right_click",
+    "middle_click",
+    "drag",
+    "scroll",
+    "type",
+    "key",
+    "set_value",
+    "focus_app",
+})
+
+# Browser tools that change page or session state. Snapshots, vision, image
+# listing, and vault list/unlock stay ungated so observation still works.
+GATED_BROWSER_TOOLS = frozenset({
+    "browser_navigate",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_exec",
+    "browser_cdp",
+    "browser_dialog",
+    "browser_vault_fill",
+    "browser_vault_save_login",
+    "browser_vault_enter_code",
+})
+
+# Stripped before the handler runs, and never forwarded to Jev as tool args.
+GATE_ARG_KEYS = frozenset({
+    "jev_action_id",
+    "jev_goal",
+    "jev_candidates",
+    "jev_regions",
+    "jev_history",
+    "jev_observation_id",
+})
+
+_FIXED_EXECUTION_GOAL = "Perform the single pre-approved action."
+
+
+def _execution_block(tool_name: str, reason: str) -> str:
+    """JSON tool error. Does not echo tool args (they may hold field values)."""
+    return json.dumps(
+        {
+            "error": (
+                f"Jev action gate blocked {tool_name}: action not executed ({reason}). "
+                "Reobserve and pass a Jev-approved action id before retrying."
+            ),
+            "blocked": True,
+            "executed": False,
+            "reason": reason,
+            "tool": tool_name,
+        },
+        ensure_ascii=False,
+    )
+
+
+def is_gated_tool_call(name: str, args: Any) -> bool:
+    """True when this call maps to an executable row in the approved table."""
+    if not isinstance(name, str) or not isinstance(args, dict):
+        return False
+    if name == "computer_use":
+        action = args.get("action")
+        if not isinstance(action, str):
+            return False
+        return action.strip().lower() in GATED_COMPUTER_ACTIONS
+    if name == "browser_console":
+        expression = args.get("expression")
+        return isinstance(expression, str) and bool(expression.strip())
+    return name in GATED_BROWSER_TOOLS
+
+
+def _surface_for_tool(name: str) -> str:
+    return "computer_use" if name == "computer_use" else "browser"
+
+
+def _table_ids(candidates: Any) -> Optional[set]:
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    ids = set()
+    for item in candidates:
+        if not isinstance(item, Mapping):
+            return None
+        action_id = item.get("id")
+        if not isinstance(action_id, str) or not action_id:
+            return None
+        ids.add(action_id)
+    return ids
+
+
+def prepare_gated_execution(name: str, args: Any) -> Tuple[Optional[str], Any]:
+    """Return ``(block_json, handler_args)`` for one tool dispatch.
+
+    When the call is not gated, or the surface gate is disabled, ``block_json``
+    is None, ``handler_args`` is the same object, and Jev is not called.
+    When the gate is enabled, a mutating action runs only if Jev returns the
+    supplied action id. A reobserve/error/timeout/low-confidence/missing-key
+    decision blocks the handler.
+    """
+    if not is_gated_tool_call(name, args):
+        return None, args
+    cfg = load_jev_action_gate_config(surface=_surface_for_tool(name))
+    if not cfg.enabled:
+        return None, args
+    return _authorize_enabled_execution(name, args, cfg)
+
+
+def _authorize_enabled_execution(
+    name: str,
+    args: Mapping[str, Any],
+    cfg: JevActionGateConfig,
+) -> Tuple[Optional[str], Any]:
+    raw_id = args.get("jev_action_id")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        return _execution_block(name, "missing_approved_action_id"), args
+    action_id = raw_id.strip()
+    if action_id in REQUIRED_ACTION_IDS:
+        return _execution_block(name, "not_an_executable_action"), args
+
+    candidates = args.get("jev_candidates")
+    if not isinstance(candidates, list):
+        return _execution_block(name, "action_not_in_approved_table"), args
+    ids = _table_ids(candidates)
+    if ids is None or action_id not in ids or not REQUIRED_ACTION_IDS <= ids:
+        return _execution_block(name, "action_not_in_approved_table"), args
+
+    goal_raw = args.get("jev_goal")
+    goal = goal_raw.strip() if isinstance(goal_raw, str) and goal_raw.strip() else _FIXED_EXECUTION_GOAL
+    regions = args.get("jev_regions") if isinstance(args.get("jev_regions"), list) else None
+    history = args.get("jev_history") if isinstance(args.get("jev_history"), list) else None
+    observation_id = args.get("jev_observation_id")
+    if not isinstance(observation_id, str):
+        observation_id = ""
+
+    # Withheld-context: only the gate fields. Never the tool args (text, code,
+    # url, screenshots, page text, field values).
+    gate_payload: Dict[str, Any] = {"goal": goal, "candidates": candidates}
+    if regions is not None:
+        gate_payload["regions"] = regions
+    if history is not None:
+        gate_payload["history"] = history
+
+    decision = choose_next_action(
+        goal=goal,
+        candidates=candidates,
+        regions=regions,
+        history=history,
+        observation_id=observation_id,
+        cfg=cfg,
+        surface=_surface_for_tool(name),
+        request_payload=gate_payload,
+    )
+    approved = (
+        not decision.fallback
+        and decision.reason == "ok"
+        and decision.action_id == action_id
+        and decision.action_id not in REQUIRED_ACTION_IDS
+    )
+    if not approved:
+        reason = decision.reason if decision.reason and decision.reason != "ok" else "action_id_mismatch"
+        return _execution_block(name, reason), args
+    cleaned = {key: value for key, value in args.items() if key not in GATE_ARG_KEYS}
+    return None, cleaned
+
+
+def schema_override_fn(surface: str, schema: Mapping[str, Any]) -> Callable[[], Optional[Dict[str, Any]]]:
+    """Schema overlay that is empty unless this surface's gate is enabled.
+
+    Returning None leaves the static schema byte-identical, so a disabled
+    gate does not change the prompt cache.
+    """
+
+    def overrides() -> Optional[Dict[str, Any]]:
+        cfg = load_jev_action_gate_config(surface=surface)
+        if not cfg.enabled:
+            return None
+        params = dict(schema.get("parameters") or {})
+        props = dict(params.get("properties") or {})
+        props["jev_action_id"] = {
+            "type": "string",
+            "description": (
+                "Action id returned by jev_choose_action. Required for mutating "
+                "actions while the Jev action gate is enabled: the tool does not "
+                "execute unless Jev approves this id from jev_candidates."
+            ),
+        }
+        props["jev_goal"] = {
+            "type": "string",
+            "description": (
+                "Short non-sensitive goal for the gate. Do not include secrets, "
+                "page text, screenshots, or field values."
+            ),
+        }
+        props["jev_candidates"] = {
+            "type": "array",
+            "description": (
+                "Pre-approved action table (id + description). Must include the "
+                "requested id plus reobserve and none."
+            ),
+            "items": {"type": "object"},
+        }
+        props["jev_regions"] = {
+            "type": "array",
+            "description": "Optional short element labels (id, role, label only).",
+            "items": {"type": "object"},
+        }
+        params["properties"] = props
+        description = str(schema.get("description") or "")
+        note = (
+            " Jev action gate is enabled: mutating actions do not execute unless "
+            "jev_action_id is approved by Jev from jev_candidates."
+        )
+        return {"parameters": params, "description": description + note}
+
+    return overrides
