@@ -13,7 +13,10 @@ shipped unguarded.
 These tests pin the dash-only guard the stream seams now run:
   * ``GatewayStreamConsumer._send_or_edit`` — the funnel every streamed frame crosses
     (native frame, draft frame, edit-in-place, first send);
-  * ``TelegramAdapter.send_draft`` — the draft-frame sender itself.
+  * ``TelegramAdapter.send_draft`` — the draft-frame sender itself;
+  * ``TelegramAdapter.send`` / ``edit_message`` — the last seam before the Bot API.
+    Edit-failure fallbacks, interim commentary, and the queued reconcile edit skip
+    the ledgered final send and used to hand the raw reply through these two.
 
 They assert the OUTGOING payload (what the adapter hands the Bot API), not the helper's
 return value, and they drive the real adapter/consumer code paths. Async tests use
@@ -487,3 +490,180 @@ class TestStaleFinalizeReconcileEditSeam:
 
         assert f"`{span}`" in writes[0], "a code span was rewritten by the reconcile edit"
         assert "then reply" in writes[0]
+
+
+def _make_send_adapter():
+    """A connected TelegramAdapter whose Bot API calls are recorded, not sent."""
+    from gateway.config import PlatformConfig
+    from plugins.platforms.telegram.adapter import TelegramAdapter
+
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    adapter._bot = MagicMock()
+    adapter._bot.send_message = AsyncMock(return_value=MagicMock(message_id=42))
+    adapter._bot.edit_message_text = AsyncMock(return_value=MagicMock(message_id=9))
+    adapter._rich_messages_enabled = False
+    adapter._rich_send_disabled = True
+    return adapter
+
+
+def _sent_text(adapter) -> str:
+    return adapter._bot.send_message.await_args.kwargs["text"]
+
+
+def _edited_text(adapter) -> str:
+    return adapter._bot.edit_message_text.await_args.kwargs["text"]
+
+
+def _prose_without_protected(text: str, *protected: str) -> str:
+    for piece in protected:
+        text = text.replace(piece, "")
+    return text
+
+
+def test_send_payload_never_carries_an_em_or_en_dash():
+    """adapter.send is the seam fallback, commentary, and bare callers use.
+
+    The final ledger brackets some of those callers; the ones that skip it used
+    to hand the raw reply to the Bot API. The outgoing text must already be
+    normalized, including after MarkdownV2 formatting.
+    """
+    adapter = _make_send_adapter()
+    span = f"git log {EM_DASH} %an"
+    url = f"https://example.com/a{EN_DASH}b"
+    raw = (
+        f"Mimi {EM_DASH} your fix is tiny. The wait is 3{EN_DASH}5 seconds. "
+        f"See {url} {EM_DASH} done. Run `{span}` now."
+    )
+
+    result = asyncio.run(adapter.send("123", raw))
+
+    assert result.success is True
+    text = _sent_text(adapter)
+    # MarkdownV2 escapes dots in a bare URL, so the protected span is not a
+    # raw substring of the payload. Strip both forms before judging prose.
+    prose = _prose_without_protected(text, span, url, url.replace(".", "\\."))
+    assert EM_DASH not in prose and EN_DASH not in prose
+    assert "Mimi, your fix is tiny" in text
+    assert "3-5" in text or "3\\-5" in text
+    assert "a" + EN_DASH + "b" in text, "a dash inside a URL was rewritten"
+    assert f"`{span}`" in text, "an inline code span was rewritten"
+    assert ",," not in text and " ," not in text
+
+
+def test_edit_preview_is_meaning_preserving_and_idempotent():
+    """A mid-stream edit is plain text: the rules are visible on the wire."""
+    adapter = _make_send_adapter()
+    span = f"git log {EM_DASH} %an"
+    fence = f"label = 'before {EM_DASH} after'  # keep  two  spaces\n"
+    url = f"https://example.com/a{EN_DASH}b"
+    raw = (
+        f"Mimi {EM_DASH} your fix is tiny.\n"
+        f"The wait is 3{EN_DASH}5 seconds.\n"
+        f"{EM_DASH} step one\n"
+        f"See {url} {EM_DASH} done.\n"
+        f"Run `{span}` now.\n"
+        f"```\n{fence}```"
+    )
+
+    async def _run():
+        first = await adapter.edit_message("123", "9", raw, finalize=False)
+        once = _edited_text(adapter)
+        await adapter.edit_message("123", "9", once, finalize=False)
+        return first, once, _edited_text(adapter)
+
+    result, once, twice = asyncio.run(_run())
+
+    assert result.success is True
+    assert "Mimi, your fix is tiny." in once
+    assert "The wait is 3-5 seconds." in once
+    assert "\n- step one\n" in once
+    assert url in once
+    assert f"`{span}`" in once
+    assert fence in once, "a fenced block was not copied byte for byte"
+    prose = _prose_without_protected(once, span, url, fence)
+    assert EM_DASH not in prose and EN_DASH not in prose
+    assert ",," not in once and " ," not in once
+    assert twice == once
+
+
+def test_successive_edit_frames_stay_a_prefix_and_never_reintroduce_a_dash():
+    adapter = _make_send_adapter()
+    frames = (
+        f"Mimi {EM_DASH}",
+        f"Mimi {EM_DASH} your",
+        f"Mimi {EM_DASH} your fix is tiny.",
+    )
+
+    async def _run():
+        seen = []
+        for frame in frames:
+            result = await adapter.edit_message("123", "9", frame, finalize=False)
+            assert result.success is True
+            seen.append(_edited_text(adapter))
+        return seen
+
+    seen = asyncio.run(_run())
+    previous = ""
+    for text in seen:
+        assert EM_DASH not in text and EN_DASH not in text
+        assert text.startswith(previous), (previous, text)
+        assert ",," not in text
+        previous = text
+    assert previous == "Mimi, your fix is tiny."
+
+
+def test_finalize_edit_payload_has_no_dash():
+    """The queued reconcile edit calls edit_message(finalize=True) with the raw reply."""
+    adapter = _make_send_adapter()
+    raw = f"Mimi {EM_DASH} your fix is tiny. Range 3{EN_DASH}5."
+
+    result = asyncio.run(adapter.edit_message("123", "9", raw, finalize=True))
+
+    assert result.success is True
+    text = _edited_text(adapter)
+    assert EM_DASH not in text and EN_DASH not in text
+    assert "Mimi, your fix is tiny" in text
+
+
+def test_edit_failure_fallback_send_payload_has_no_dash():
+    """When progressive edits die, the consumer sends the raw accumulated reply."""
+    adapter = _make_send_adapter()
+    consumer = GatewayStreamConsumer(adapter, "123")
+    raw = f"Mimi {EM_DASH} your fix is tiny. The wait is 3{EN_DASH}5 seconds."
+
+    asyncio.run(consumer._send_fallback_final(raw))
+
+    assert adapter._bot.send_message.await_count == 1
+    text = _sent_text(adapter)
+    assert EM_DASH not in text and EN_DASH not in text
+    assert "Mimi, your fix is tiny" in text
+    assert ",," not in text
+
+
+def test_commentary_send_payload_has_no_dash():
+    adapter = _make_send_adapter()
+    consumer = GatewayStreamConsumer(adapter, "123")
+
+    ok = asyncio.run(consumer._send_commentary(f"checking the ledger {EM_DASH} one moment"))
+
+    assert ok is True
+    text = _sent_text(adapter)
+    assert EM_DASH not in text and EN_DASH not in text
+    assert "checking the ledger, one moment" in text
+
+
+def test_a_broken_dash_normalizer_still_sends_the_frame(monkeypatch):
+    """Any internal failure is swallowed; the frame is sent, not dropped."""
+    def _boom(_text: str) -> str:
+        raise RuntimeError("formatter down")
+
+    monkeypatch.setattr(
+        "plugins.platforms.telegram.adapter._normalize_stream_dashes", _boom)
+    adapter = _make_send_adapter()
+    raw = f"Mimi {EM_DASH} your fix is tiny."
+
+    result = asyncio.run(adapter.send("123", raw))
+
+    assert result.success is True
+    assert adapter._bot.send_message.await_count == 1
+    assert EM_DASH in _sent_text(adapter)
