@@ -1354,6 +1354,10 @@ platform_toolsets:
 #     # allowed_chats: ["-1001234567890"]
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
+#       # Seconds. Consecutive inbound bubbles in one chat within this window are one
+#       # burst; an agent reaction on a non-final bubble waits and lands on the final one.
+#       # No env var — config.yaml only. Default 2.0 when omitted.
+#       reaction_burst_window: 2.0
 #       rich_messages: false          # Bot API 10.1 rich messages (tables/task lists/details/math); default false for copyable legacy MarkdownV2, set true to opt in
 #       rich_drafts: false            # Experimental rich draft previews during Telegram DM streaming; default false because Telegram Desktop/macOS can visually overlay draft frames
 #       allow_cjk_rich_messages: false # Keep CJK content on the safe MarkdownV2 path unless an unaffected client explicitly opts in to native rich rendering

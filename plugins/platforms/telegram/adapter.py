@@ -6747,6 +6747,9 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name=user_name, thread_id=thread_id_str, chat_topic=chat_topic, message_id=str(message.message_id),
             is_bot=bool(getattr(user, "is_bot", False)) if user else False)
         reply_to_id, reply_to_text = self._reply_context(message)
+        # Burst membership is recorded here so a later react_to_message can tell a
+        # non-final bubble from the last one, even when text batching merges the text.
+        self._note_inbound_reaction_bubble(str(chat.id), str(message.message_id))
         from gateway.platforms.base import resolve_channel_prompt  # per-channel/topic ephemeral prompt
         from plugins.platforms.telegram.telegram_context import group_identity_prompt
         _chat_id_str = str(chat.id)
@@ -6774,7 +6777,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     #: Lifecycle styles: ``receipt`` posts 👀 then 👍/👎 (the behaviour every install had before this
     #: key existed), ``content`` posts none of our own — the agent reacts deliberately through
-    #: ``send_message action="react"`` — and ``off`` is the same as ``reactions: false``.
+    #: ``react_to_message`` — and ``off`` is the same as ``reactions: false``.
     _RECEIPT_STYLE, _CONTENT_STYLE, _OFF_STYLE = "receipt", "content", "off"
 
     def _reaction_style(self) -> str:
@@ -6842,23 +6845,145 @@ class TelegramAdapter(BasePlatformAdapter):
         """Clear all bot-set reactions."""
         return await self._set_reaction(chat_id, message_id, None, phase=phase)
 
-    # -- Agent-facing reactions (send_message action="react"): deliberate intents, so NOT gated by the
+    # -- Agent-facing reactions (react_to_message): deliberate intents, so NOT gated by the
     # reactions master switch or the lifecycle style (same split as Photon's tapbacks).
+    # Burst grouping lives here, not on the lifecycle receipts above: consecutive inbound
+    # bubbles from the same chat within ``reaction_burst_window`` are one thought, and a
+    # reaction aimed at a non-final bubble is held until the window closes, then applied
+    # to the final bubble. Lifecycle 👀/👍 still mark the event's own bubble.
+
+    def _reaction_burst_window_s(self) -> float:
+        """Seconds. ``extra.reaction_burst_window`` from config.yaml, else 2.0.
+
+        No env var: the knob is config.yaml only (no new ``HERMES_*`` / ``TELEGRAM_*``).
+        A missing key keeps the default. A non-numeric or negative value warns once and
+        falls back, so a typo cannot break a turn.
+        """
+        from plugins.platforms.telegram.reaction_bursts import DEFAULT_REACTION_BURST_WINDOW_S
+
+        raw = (getattr(self.config, "extra", None) or {}).get("reaction_burst_window")
+        if raw is None:
+            return DEFAULT_REACTION_BURST_WINDOW_S
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = -1.0
+        if value < 0:
+            if not getattr(self, "_reaction_burst_window_warned", False):
+                self._reaction_burst_window_warned = True
+                logger.warning(
+                    "[%s] invalid reaction_burst_window %r; using %s",
+                    getattr(self, "name", "telegram"), raw, DEFAULT_REACTION_BURST_WINDOW_S)
+            return DEFAULT_REACTION_BURST_WINDOW_S
+        return value
+
+    def _reaction_burst_tracker(self):
+        """Lazy tracker so bare ``object.__new__`` adapters (tests) still group."""
+        from plugins.platforms.telegram.reaction_bursts import ReactionBurstTracker
+
+        window = self._reaction_burst_window_s()
+        clock = getattr(self, "_reaction_burst_clock", None)
+        tracker = getattr(self, "_reaction_bursts", None)
+        if tracker is None:
+            tracker = ReactionBurstTracker(window_s=window, clock=clock)
+            self._reaction_bursts = tracker
+        else:
+            tracker.window_s = window
+            if clock is not None:
+                tracker._clock = clock
+        return tracker
+
+    def _note_inbound_reaction_bubble(self, chat_id, message_id) -> None:
+        """Record one inbound bubble. Never raises into message intake."""
+        try:
+            tracker = self._reaction_burst_tracker()
+            tracker.note(chat_id, message_id)
+            if tracker._ready:
+                self._kick_reaction_burst_flush()
+        except Exception:
+            logger.debug("reaction burst note failed", exc_info=True)
+
+    def _reaction_burst_clock_injected(self) -> bool:
+        """Tests inject a clock and flush explicitly; production arms a real sleep."""
+        return getattr(self, "_reaction_burst_clock", None) is not None
+
+    def _kick_reaction_burst_flush(self) -> None:
+        if self._reaction_burst_clock_injected():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.flush_due_reaction_bursts())
+
+    def _arm_reaction_burst_flush(self, chat_id: str) -> None:
+        """Wake when this chat's open burst closes, unless a test owns the clock."""
+        if self._reaction_burst_clock_injected():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        tasks = getattr(self, "_reaction_burst_flush_tasks", None)
+        if tasks is None:
+            self._reaction_burst_flush_tasks = tasks = {}
+        prior = tasks.get(chat_id)
+        if prior is not None and not prior.done():
+            prior.cancel()
+        delay = self._reaction_burst_tracker().seconds_until_close(chat_id)
+        tasks[chat_id] = loop.create_task(self._flush_reaction_burst_after(chat_id, delay))
+
+    async def _flush_reaction_burst_after(self, chat_id: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(max(0.0, delay))
+            await self.flush_due_reaction_bursts()
+        except asyncio.CancelledError:
+            return
+
+    async def flush_due_reaction_bursts(self) -> None:
+        """Apply held reactions whose burst has closed, on the final bubble."""
+        try:
+            due = self._reaction_burst_tracker().take_due()
+        except Exception:
+            logger.debug("reaction burst flush failed", exc_info=True)
+            return
+        for chat_id, final_id, emoji in due:
+            try:
+                await self._set_reaction(chat_id, final_id, emoji, phase=PHASE_DIRECT)
+            except Exception:
+                logger.debug("deferred reaction failed", exc_info=True)
+
+    async def _agent_reaction(self, chat_id: str, message_id: str, emoji: Optional[str]) -> bool:
+        """Fire now, or hold a non-final target until the burst closes and retarget it."""
+        await self.flush_due_reaction_bursts()
+        tracker = self._reaction_burst_tracker()
+        if tracker.should_defer(chat_id, message_id):
+            tracker.defer(chat_id, emoji)
+            self._arm_reaction_burst_flush(str(chat_id))
+            return True
+        tracker.drop_pending_if_firing(chat_id, message_id)
+        if emoji is None:
+            return await self._clear_reactions(chat_id, message_id, phase=PHASE_DIRECT)
+        return await self._set_reaction(chat_id, message_id, emoji, phase=PHASE_DIRECT)
 
     async def add_reaction(self, chat_id: str, emoji: str, message_id: Optional[str] = None) -> bool:
         """React to ``message_id`` with ``emoji``. Telegram keeps no per-chat "latest inbound" record,
-        so an omitted ``message_id`` fails instead of guessing the wrong message to react to."""
+        so an omitted ``message_id`` fails instead of guessing the wrong message to react to.
+
+        A non-final bubble of an open burst is not reacted to now: the reaction is held and
+        applied to the final bubble when the burst window closes.
+        """
         if not message_id:
             logger.debug("[%s] add_reaction skipped: message_id required", self.name)
             return False
-        return await self._set_reaction(chat_id, message_id, emoji, phase=PHASE_DIRECT)
+        return await self._agent_reaction(chat_id, message_id, emoji)
 
     async def remove_reaction(self, chat_id: str, message_id: Optional[str] = None) -> bool:
         """Clear the bot's reactions on ``message_id`` (same wrapper contract as ``add_reaction``)."""
         if not message_id:
             logger.debug("[%s] remove_reaction skipped: message_id required", self.name)
             return False
-        return await self._clear_reactions(chat_id, message_id, phase=PHASE_DIRECT)
+        return await self._agent_reaction(chat_id, message_id, None)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add an in-progress reaction when message processing begins."""
@@ -7008,6 +7133,9 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
         _bridge_gate(key, env, telegram_cfg.get(key), seed_extra=seed)
     _bridge_lower("reactions", "TELEGRAM_REACTIONS")
     _bridge_lower("reaction_style", "TELEGRAM_REACTION_STYLE")
+    # Burst window is config.yaml only. Do not bridge a TELEGRAM_* / HERMES_* env var.
+    if "reaction_burst_window" in telegram_cfg:
+        extras.setdefault("reaction_burst_window", telegram_cfg["reaction_burst_window"])
     if "proxy_url" in telegram_cfg:
         # Seeded into extra so ``_build_ptb_requests`` keeps a secondary's route without the env bridge.
         extras.setdefault("proxy_url", str(telegram_cfg["proxy_url"]).strip())
