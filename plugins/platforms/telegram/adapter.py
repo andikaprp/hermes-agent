@@ -40,16 +40,18 @@ except Exception:  # pragma: no cover - delivery_voice imports only `re`; defens
         return text
 
 
-def _dash_safe_draft_text(content: str) -> str:
-    """Dash-normalize one streamed draft frame; ANY failure sends it unchanged.
+def _dash_safe_text(content: str) -> str:
+    """Dash-normalize one outbound Telegram text; ANY failure sends it unchanged.
 
     A formatting helper must never delay, reorder or drop a frame (mirrors the
-    swallow-don't-fail discipline of gateway/naturalness_voice.py).
+    swallow-don't-fail discipline of gateway/naturalness_voice.py). Drafts,
+    edits and sends all cross this: a caller that skipped the stream funnel
+    must not be the path an em dash uses to reach the chat.
     """
     try:
         return _normalize_stream_dashes(content)
     except Exception:
-        logger.debug("Draft dash normalization failed; sending the frame unchanged",
+        logger.debug("Dash normalization failed; sending the frame unchanged",
                      exc_info=True)
         return content
 
@@ -3514,6 +3516,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Send a message to a Telegram chat."""
         content = self.strip_cron_wrapper(content)
+        # Last seam before the Bot API. Fallback, commentary, and any caller that
+        # skipped send_final_ledgered still land here; a dash must not.
+        content = _dash_safe_text(content)
         if not self._bot:
             live = self._replacement_telegram_adapter()
             if live is not None:
@@ -3632,6 +3637,10 @@ class TelegramAdapter(BasePlatformAdapter):
         Telegram caps a message at 4096 UTF-16 codeunits. Streaming replies that outgrow it must NOT be truncated
         silently nor fail (the consumer would re-send a duplicate): edit with the first chunk, send the rest as
         continuations, and return the final chunk's id as the next edit target."""
+        # Same last seam as send(): queued reconcile edits and any other caller
+        # pass the raw reply. Dash-only, so a mid-stream preview is not stripped
+        # of scaffolding (that would snap the growing message backwards).
+        content = _dash_safe_text(content)
         if not self._bot:
             return SendResult(success=False, error="Not connected")
         # Rich finalize (Bot API 10.1): edit the preview IN PLACE via rich_message — no fresh send + delete.
@@ -3857,7 +3866,7 @@ class TelegramAdapter(BasePlatformAdapter):
         # Drafts are ephemeral frames of the answer being generated: they are read BEFORE (and, on a
         # streamed turn, instead of) the guarded final send, so the dash normalization every final text
         # crosses has to be applied here too. Dash-only, code spans untouched, idempotent per frame.
-        content = _dash_safe_draft_text(content)
+        content = _dash_safe_text(content)
         if not self._bot:
             return SendResult(success=False, error="not_connected")
         # Rich draft fast-path; any failure degrades to the plain draft below. Drafts have no message_id.
