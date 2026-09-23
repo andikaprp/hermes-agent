@@ -10,6 +10,7 @@ Contracts (not snapshots):
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
@@ -289,9 +290,14 @@ class TestJevRoutingHelpers:
         ]
         body = build_jev_routing_request("alright then", history=history)
         prior_blob = next(s for s in body["state"] if s.startswith("Prior user turns"))
+        blob = json.dumps(body)
         assert "sk-live" not in prior_blob
-        assert "[secret]" in prior_blob
-        assert "follow up please" in prior_blob
+        assert "«redacted:sk-…" not in prior_blob
+        assert "[secret]" not in prior_blob
+        assert "follow up please" not in prior_blob
+        assert "alright then" not in blob
+        assert "hash=" in prior_blob
+        assert "chars=" in prior_blob
         assert len(body["state"]) == 3
 
     def test_verdict_cache_skips_second_http(self):

@@ -2163,8 +2163,10 @@ DEFAULT_CONFIG = {
             },
         },
         # LAB-59: local Jev decision observability (default OFF). shadow/on append
-        # metadata-only rows to <hermes_home>/logs/jev-decisions.jsonl for the
-        # dashboard/export; nothing is sent off-box. off = no recording.
+        # metadata-only rows to <hermes_home>/logs/jev-decisions.jsonl, which is
+        # THE decision store (stdlib max-bytes rollover to .1). The dashboard
+        # GET routes are a read-only local view; nothing is sent off-box.
+        # off = no recording.
         "jev_observability": {
             "mode": "off",  # off | shadow | on
             "limit": 200,

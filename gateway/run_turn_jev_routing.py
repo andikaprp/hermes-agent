@@ -20,7 +20,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
-from agent.jev_payload_hygiene import content_hash, mask_state_text
+from agent.jev_payload_hygiene import content_hash, text_metadata
 from gateway.run_turn_fast_path import _ACK_WORDS, _DIRECTIVE_WORDS
 from gateway.telegram_delivery_receipt import CHAT_DIGEST_PREFIX, redacted_token
 
@@ -207,9 +207,7 @@ def _prior_user_turns_block(
             text = str(raw_content).strip()
         if not text:
             continue
-        masked = mask_state_text(text, limit=800)
-        if masked:
-            collected.append(masked)
+        collected.append(text_metadata(text, label="prior_user"))
         if len(collected) >= max_turns:
             break
     if not collected:
@@ -239,13 +237,17 @@ def build_jev_routing_request(
     model: str = DEFAULT_JEV_MODEL,
     history: Optional[Sequence[Any]] = None,
 ) -> dict:
-    """System One choice request: redacted/truncated message + lexicon context as state."""
+    """System One choice request: hash/metadata for the message, lexicon as context.
+
+    The inbound text and prior user turns are never copied into ``state``.
+    A blind or low-confidence answer still falls through
+    ``maybe_jev_route_uncertain`` (below threshold / any failure -> normal lane).
+    """
     state: list[str] = [_lexicon_state_context()]
     prior = _prior_user_turns_block(history)
     if prior:
         state.append(prior)
-    text = mask_state_text(message or "", limit=280)
-    state.append(f"Inbound message:\n{text}")
+    state.append(text_metadata(message or "", label="Inbound message"))
     return {
         "model": model,
         "state": state,
@@ -355,7 +357,8 @@ def maybe_jev_route_uncertain(
     """For an uncertain-band message: ask Jev, or return ``None`` (deterministic default).
 
     Returns ``"social"`` only when Jev chooses ``lane`` with confidence >= threshold.
-    ``history`` supplies masked prior user turns for Jev state when present.
+    Below threshold, missing key, breaker, or any error returns ``None`` (normal lane).
+    ``history`` supplies hash/metadata for prior user turns, never the text.
     """
     cfg = load_jev_routing_config(user_config)
     if not cfg.enabled:

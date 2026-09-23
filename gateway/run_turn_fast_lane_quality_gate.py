@@ -20,7 +20,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
-from agent.jev_payload_hygiene import content_hash, mask_state_text
+from agent.jev_payload_hygiene import content_hash, text_metadata
 from gateway.telegram_delivery_receipt import CHAT_DIGEST_PREFIX, redacted_token
 
 logger = logging.getLogger("gateway.run_turn")
@@ -30,7 +30,6 @@ CONFIG_KEY = "gateway.telegram.fast_lane.quality_gate"
 DEFAULT_THRESHOLD = 0.7
 DEFAULT_TIMEOUT_SECONDS = 1.5
 QUALITY_QUESTION_ID = "quality"
-_STATE_REDACT_CHARS = 280
 
 # Frozen prompt shape — keep stable (PR / tests document this wording).
 CHOICE_INSTRUCTIONS = (
@@ -91,29 +90,28 @@ def load_quality_gate_config(user_config: Any = None) -> FastLaneQualityGateConf
         return FastLaneQualityGateConfig()
 
 
-def _redact_lane_text(text: str, *, limit: int = _STATE_REDACT_CHARS) -> str:
-    """Truncate + secret-redact lane context so raw dumps are not sent to Jev."""
-    return mask_state_text(text, limit=limit)
-
-
 def build_quality_gate_request(
     user_message: str,
     draft_reply: str,
     *,
     model: str = DEFAULT_JEV_MODEL,
 ) -> dict:
-    """System One choice request: redacted user + draft as state.
+    """System One choice request: hash/metadata for the user message and draft.
 
     Prompt shape is frozen (see ``CHOICE_INSTRUCTIONS`` / ``CHOICE_CRITERIA``).
+    Neither the user message nor the draft reply is copied into ``state``.
+    Any failure still fail-opens (send the draft); only a confident escalate
+    leaves the lane.
     """
     return {
         "model": model,
         "state": [
             "LAB-52 fast-lane draft quality check. "
             "The inbound turn was classified as a no-task social/ack turn. "
-            "Judge only whether this short draft is acceptable to send as-is.",
-            f"User message:\n{_redact_lane_text(user_message)}",
-            f"Draft reply:\n{_redact_lane_text(draft_reply)}",
+            "Judge only from the hashes and metadata below; the user message "
+            "and draft reply are not included.",
+            "User message:\n" + text_metadata(user_message, label="user_message"),
+            "Draft reply:\n" + text_metadata(draft_reply, label="draft_reply"),
         ],
         "questions": {
             QUALITY_QUESTION_ID: {

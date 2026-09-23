@@ -19,7 +19,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
-from agent.jev_payload_hygiene import content_hash, mask_state_text
+from agent.jev_payload_hygiene import content_hash, text_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -99,13 +99,12 @@ def build_jev_memory_triage_request(
     target: str = "memory",
     model: str = DEFAULT_JEV_MODEL,
 ) -> dict:
-    """System One noul request over a redacted/truncated proposed entry."""
-    label = "user profile" if target == "user" else "memory"
-    text = mask_state_text(entry_text or "", limit=480)
+    """System One noul request over a hash of the proposed entry. No raw text."""
+    label = "user_profile" if target == "user" else "memory"
     return {
         "model": model,
         "state": [
-            f"Proposed {label} entry to persist across sessions:\n{text}",
+            text_metadata(entry_text or "", label=f"proposed_{label}_entry"),
         ],
         "questions": {
             QUESTION_ID: {

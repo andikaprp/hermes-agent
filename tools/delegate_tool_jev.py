@@ -20,7 +20,7 @@ from agent.context_compressor_jev import (
     _post_systemone,
     resolve_typesafe_api_key,
 )
-from agent.jev_payload_hygiene import mask_state_text
+from agent.jev_payload_hygiene import text_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -109,20 +109,32 @@ def task_hash_for(task_list: Sequence[Dict[str, Any]], context: Optional[str] = 
 
 
 def build_task_state(task_list: Sequence[Dict[str, Any]], context: Optional[str] = None) -> str:
-    """Flatten the pending delegation into one redacted state string for System One."""
+    """Flatten the pending delegation into hash/metadata. No goal or context text."""
     lines: List[str] = []
     if context:
-        lines.append(f"Shared context: {mask_state_text(str(context), limit=400)}")
+        lines.append(text_metadata(str(context), label="shared_context"))
+    n_tasks = 0
     for i, task in enumerate(task_list):
         if not isinstance(task, dict):
             continue
-        goal = mask_state_text(str(task.get("goal") or "").strip(), limit=280)
-        tctx = mask_state_text(str(task.get("context") or "").strip(), limit=280)
-        block = f"Task {i + 1}: {goal}" if goal else f"Task {i + 1}:"
-        if tctx:
-            block = f"{block}\nTask context: {tctx}"
-        lines.append(block)
-    return "\n\n".join(lines).strip() or "(empty task)"
+        n_tasks += 1
+        goal = str(task.get("goal") or "")
+        tctx = str(task.get("context") or "")
+        lines.append(
+            text_metadata(
+                goal,
+                label=f"task_{i + 1}_goal",
+                extra_counts={"index": i + 1},
+            )
+        )
+        if tctx.strip():
+            lines.append(text_metadata(tctx, label=f"task_{i + 1}_context"))
+    if not lines:
+        lines.append(text_metadata("", label="task", extra_counts={"tasks": 0}))
+    elif context is None:
+        lines.insert(0, text_metadata("", label="shared_context", extra_flags=["absent"]))
+    lines.append(f"task_count={n_tasks}")
+    return "\n".join(lines)
 
 
 def build_delegate_choice_request(

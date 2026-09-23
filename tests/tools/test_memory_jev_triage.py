@@ -73,7 +73,9 @@ class TestJevMemoryTriageHelpers:
         assert q["type"] == "noul"
         assert q["instructions"] == NOUL_INSTRUCTIONS
         assert q["criteria"] == NOUL_CRITERIA
-        assert DURABLE_ENTRY in body["state"][0]
+        assert DURABLE_ENTRY not in body["state"][0]
+        assert "hash=" in body["state"][0]
+        assert "chars=" in body["state"][0]
 
     def test_parse_noul_answer(self):
         assert parse_noul_answer(_noul_response(0.81)) == pytest.approx(0.81)
