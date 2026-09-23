@@ -1302,6 +1302,20 @@ TELEGRAM_REACTION_STYLE=content
 
 `reactions: false` remains the master switch — no style value produces automatic reactions while it is off. A style the bot does not recognize is logged once and falls back to `receipt`, so a typo never breaks message processing.
 
+### Inbound typing indicator
+
+The native Telegram "typing…" bubble (`sendChatAction`) is not a reaction. `reaction_style: content` does not disable it. It fires when an inbound message is accepted — before the conversational quiet window and before media download — so the chat shows activity within a fraction of a second.
+
+```yaml
+telegram:
+  extra:
+    typing_indicator: true   # default; set false to suppress the inbound bubble
+```
+
+There is no environment variable for this key. The same `typing_indicator` field on the platform block is honored when `extra` does not set it.
+
+The conversational DM coalesce window (`extra.text_batch_quiet_seconds`) defaults to `0.3` seconds so the turn opens inside one second. Set it higher to restore a longer merge wait, or `0` to open immediately (a second bubble that arrives after the window will not be merged into that turn). No environment variable.
+
 :::note
 Unlike Discord (where reactions are additive), Telegram's Bot API replaces all bot reactions in a single call. The transition from 👀 to 👍/👎 happens atomically — you won't see both at once.
 :::

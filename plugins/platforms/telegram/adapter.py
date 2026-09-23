@@ -442,8 +442,11 @@ class TelegramAdapter(BasePlatformAdapter):
     # ``_text_batch_delay_for`` runs inside the flush task, where an AttributeError is swallowed
     # into a never-retrieved task exception and the buffered burst is lost with no user-visible
     # error — so every knob it reads needs a class-level value, not only an instance one.
+    # 300ms (was 2s) so a task turn opens inside 1s. Late bubbles inside the window still merge;
+    # opening at 0 and appending into a running turn would race the prompt snapshot and, under
+    # busy_input_mode=interrupt, restart the turn. ``extra.text_batch_quiet_seconds`` is the escape.
     _conversational_dm_batching: bool = False
-    _text_batch_quiet_seconds: float = 2.0
+    _text_batch_quiet_seconds: float = 0.3
     _text_batch_max_wait_seconds: float = 5.0
     # None = consult gateway.telegram.fast_lane at call time (default on). Explicit bool for tests.
     _fast_lane_quiet_bypass: Optional[bool] = None
@@ -520,7 +523,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "HERMES_TELEGRAM_TEXT_BATCH_SPLIT_DELAY_SECONDS", 1.0, min_value=self._text_batch_delay_seconds, max_value=4.0)
         self._conversational_dm_batching = self._coerce_bool_extra("conversational_dm_batching", False)
         self._text_batch_quiet_seconds = self._coerce_float_extra(
-            "text_batch_quiet_seconds", 2.0, min_value=0.2, max_value=5.0)
+            "text_batch_quiet_seconds", 0.3, min_value=0.0, max_value=5.0)
         self._text_batch_max_wait_seconds = self._coerce_float_extra(
             "text_batch_max_wait_seconds", 5.0, min_value=self._text_batch_quiet_seconds, max_value=15.0)
         self._drop_delayed_deliveries = False
@@ -5205,6 +5208,61 @@ class TelegramAdapter(BasePlatformAdapter):
         self._telegram_typing_cooldown_until.pop(str(chat_id), None)
         return False
 
+    def _inbound_typing_enabled(self) -> bool:
+        """Native inbound typing. Independent of ``reaction_style``.
+
+        Gated by ``extra.typing_indicator`` (default true). The typed
+        ``PlatformConfig.typing_indicator`` field is the same key when the
+        platform block promotes it. A missing key stays on. No env var.
+        """
+        config = getattr(self, "config", None)
+        if config is None:
+            return True
+        extra = getattr(config, "extra", None)
+        if isinstance(extra, dict) and extra.get("typing_indicator") is not None:
+            return self._coerce_bool_extra("typing_indicator", True)
+        return bool(getattr(config, "typing_indicator", True))
+
+    def _arm_inbound_typing_from_message(self, msg) -> None:
+        """Schedule one ``sendChatAction('typing')`` for an accepted bubble.
+
+        Called at the inbound handler, before any quiet-window sleep or media
+        download. Never blocks and never raises into the update handler.
+        """
+        try:
+            chat = getattr(msg, "chat", None)
+            chat_id = getattr(chat, "id", None) if chat is not None else None
+            if chat_id is None or not self._inbound_typing_enabled():
+                return
+            thread_id = getattr(msg, "message_thread_id", None)
+            metadata = {"message_thread_id": thread_id} if thread_id else None
+            self._schedule_inbound_typing(str(chat_id), metadata)
+        except Exception:
+            logger.debug("[%s] inbound typing arm failed", getattr(self, "name", "telegram"), exc_info=True)
+
+    def _schedule_inbound_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Fire-and-forget one typing action. Failures stay inside the task."""
+        if not chat_id:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _quiet() -> None:
+            with contextlib.suppress(Exception):
+                await self.send_typing(str(chat_id), metadata=metadata)
+
+        try:
+            task = loop.create_task(_quiet())
+        except Exception:
+            return
+        # Shutdown cancels _background_tasks, so a detached hint cannot outlive the adapter.
+        tracked = getattr(self, "_background_tasks", None)
+        if isinstance(tracked, set):
+            tracked.add(task)
+            task.add_done_callback(tracked.discard)
+
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Send typing indicator."""
         if not self._bot or self._typing_in_cooldown(chat_id):
@@ -6067,6 +6125,8 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         if not self._gate_or_observe(msg, update, MessageType.TEXT):
             return
+        # Before forum-command registration and the quiet-window flush. One action per bubble.
+        self._arm_inbound_typing_from_message(msg)
         await self._ensure_forum_commands(update.message)
         self._enqueue_text_event(await self._build_triggered_event(msg, update, MessageType.TEXT))
 
@@ -6080,6 +6140,7 @@ class TelegramAdapter(BasePlatformAdapter):
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg)
             return
+        self._arm_inbound_typing_from_message(msg)
         await self._ensure_forum_commands(msg)
         event = await self._build_triggered_event(msg, update, MessageType.COMMAND)
         # A >4096-char command paste arrives as a near-limit COMMAND chunk plus TEXT continuations; dispatching
@@ -6107,6 +6168,7 @@ class TelegramAdapter(BasePlatformAdapter):
         lon = getattr(location, "longitude", None)
         if lat is None or lon is None:
             return
+        self._arm_inbound_typing_from_message(msg)
         parts = ["[The user shared a location pin.]"]
         if venue:
             title = getattr(venue, "title", None)
@@ -6234,7 +6296,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 opened = getattr(pending, "_batch_opened_mono", time.monotonic())
                 elapsed = max(0.0, time.monotonic() - opened)
                 remaining = max(0.0, float(self._text_batch_max_wait_seconds) - elapsed)
-                return min(float(self._text_batch_quiet_seconds), remaining)
+                quiet = min(float(self._text_batch_quiet_seconds), remaining)
+                # Near-limit chunks are client splits, not a conversational pause. The short
+                # quiet window would dispatch a truncated paste; keep at least the split delay,
+                # still clamped by the absolute max-wait cap.
+                last_len = getattr(pending, "_last_chunk_len", 0) or 0
+                if last_len >= self._SPLIT_THRESHOLD:
+                    quiet = max(quiet, min(float(self._text_batch_split_delay_seconds), remaining))
+                return quiet
         last_len = getattr(pending, "_last_chunk_len", 0) if pending else 0
         total_len = len(getattr(pending, "text", "") or "") if pending else 0
         if last_len >= self._SPLIT_THRESHOLD:
@@ -6448,6 +6517,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 await self._cache_observed_media(msg, _event)
                 self._observe_unmentioned_group_message(msg, _event.message_type, update_id=update.update_id, event=_event)
             return
+        # Before sticker vision / photo download / album debounce. One action per accepted bubble.
+        self._arm_inbound_typing_from_message(msg)
         event = self._build_message_event(msg, self._media_message_type(msg), update_id=update.update_id)
         if msg.caption:
             from plugins.platforms.telegram.telegram_context import group_trigger_text

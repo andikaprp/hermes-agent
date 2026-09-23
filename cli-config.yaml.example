@@ -1367,6 +1367,18 @@ platform_toolsets:
 #     # allowed_chats: ["-1001234567890"]
 #     extra:
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
+#       # Native "typing…" bubble (sendChatAction) at inbound, before the quiet
+#       # window and before media download. Not a reaction: reaction_style=content
+#       # does not disable it. No env var — config.yaml only. Default true.
+#       typing_indicator: true
+#       # Conversational DM coalesce window (seconds). The turn opens after this
+#       # quiet period so a rapid second bubble still merges. Default 0.3 (was 2.0).
+#       # Set higher to restore the old wait; 0 opens immediately (late bubbles may
+#       # not merge into the same turn). Client-split chunks near 4000 chars still
+#       # wait the split delay. No env var — config.yaml only.
+#       # conversational_dm_batching: false
+#       # text_batch_quiet_seconds: 0.3
+#       # text_batch_max_wait_seconds: 5
 #       # Seconds. Consecutive inbound bubbles in one chat within this window are one
 #       # burst; an agent reaction on a non-final bubble waits and lands on the final one.
 #       # No env var — config.yaml only. Default 2.0 when omitted.
