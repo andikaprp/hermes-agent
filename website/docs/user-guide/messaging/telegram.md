@@ -1285,7 +1285,7 @@ TELEGRAM_REACTIONS=true
 | Style | Behaviour |
 |-------|-----------|
 | `receipt` (default) | Automated lifecycle receipts — 👀 while processing, then 👍 / 👎 (cleared if the turn is cancelled) |
-| `content` | No automatic reactions at all; the agent reacts only where it deliberately decides to, via `send_message` with `action="react"` (pass `message_id`) |
+| `content` | No automatic reactions at all; the agent reacts only where it deliberately decides to, via the `react_to_message` tool (pass `message_id`) |
 | `off` | Same as leaving reactions disabled |
 
 ```yaml
