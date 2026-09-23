@@ -2141,10 +2141,13 @@ class GatewayTurnMixin:
 
             # LAB-61: optional Jev completion score before claiming done / delivering.
             # Fail-open; low-confidence / contradiction / non-done → HITL flags on the result.
+            # The consumer reads hitl_escalation and registers a clarify ask (default-off
+            # gate lives in the verifier; no flag means this call is a no-op).
             if isinstance(agent_result, dict):
                 try:
                     from gateway.run_turn_jev_completion import maybe_verify_turn_completion
                     from gateway.run import _load_gateway_config, _terminal_scope_cwd
+                    from gateway.jev_completion_hitl import consume_hitl_escalation
 
                     agent_result = maybe_verify_turn_completion(
                         agent_result,
@@ -2152,6 +2155,10 @@ class GatewayTurnMixin:
                         chat_id=getattr(source, "chat_id", None),
                         session_id=getattr(session_entry, "session_id", None) or _run_start_session_id,
                         cwd=_terminal_scope_cwd(),
+                    )
+                    consume_hitl_escalation(
+                        agent_result,
+                        session_key=_quick_key or session_key,
                     )
                 except Exception as _jev_comp_exc:
                     logger.debug("jev_completion gate skipped: %s", _jev_comp_exc)

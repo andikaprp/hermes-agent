@@ -484,6 +484,8 @@ def apply_completion_verdict(agent_result: dict, verdict: CompletionVerdict) -> 
 
     agent_result["completed"] = False
     agent_result["partial"] = True
+    # Read by gateway.jev_completion_hitl (tools.clarify_gateway ask). This
+    # module only sets the flag; it does not deliver the question.
     agent_result["hitl_escalation"] = True
     agent_result["jev_completion"] = {
         "verdict": verdict.verdict,
