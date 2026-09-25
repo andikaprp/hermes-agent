@@ -424,6 +424,18 @@ curl -s -X POST \
   }"
 ```
 
+### Step 7b (optional): Jev review triage
+
+When `code_review.jev_triage.enabled` is true (default **off**) and `TYPESAFE_API_KEY` is set, run the runtime hook. Do not paste the triage helpers inline — the review flow is skill-driven, and this command is the call path (`run_review_triage_hook` in `agent/jev_review_triage.py`).
+
+```bash
+# From the Hermes checkout. No-op when the gate is off (does not call gh).
+# Calls triage_pr_review, posts at most one COMMENT per PR, never auto-approves.
+PYTHONPATH=. python -m agent.jev_review_triage --pr "$PR_NUMBER"
+```
+
+Low confidence becomes `needs-human`. The hook never submits a GitHub `APPROVE` review. It does not replace the human review gate. Only after this hook (or when it prints `jev triage disabled`) proceed to formal `gh pr review` approve / request-changes — that remains a human-gated or explicit skill action.
+
 ### Step 8: Also post a summary comment
 
 In addition to inline comments, leave a top-level summary so the PR author gets the full picture at a glance. Use the review output format from `references/review-output-template.md`.

@@ -265,6 +265,12 @@ element.textContent = userInput;
 
 ## Integration with Other Skills
 
+**github (PR review):** When reviewing a GitHub PR, run
+`python -m agent.jev_review_triage --pr "$PR_NUMBER"` from the Hermes checkout
+(`run_review_triage_hook` in `agent/jev_review_triage.py`). It calls
+`triage_pr_review` only when `code_review.jev_triage.enabled` is true (default
+off), posts at most one comment per PR, and never auto-approves.
+
 **subagent-driven-development:** Run this after EACH task as the quality gate.
 The two-stage review (spec compliance + code quality) uses this pipeline.
 

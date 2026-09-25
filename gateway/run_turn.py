@@ -33,6 +33,7 @@ from gateway.session import (
 )
 from gateway.session_transcript import TranscriptReadError
 from gateway.turn_context import TurnContext
+from gateway.turn_timing import current_turn_timing
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
 from hermes_constants import get_hermes_home_override
 from pathlib import Path
@@ -86,6 +87,15 @@ _UNEXPECTED_SILENCE_REPLY = (
     "⚠️ The model returned only a silence marker for a message that needed a reply. "
     "Try again or rephrase."
 )
+
+
+def _surface_toolsets_for_source(adapter) -> set:
+    """Toolsets that exist because of the SESSION's surface (root AGENTS.md): a chat adapter that
+    implements the reaction API earns the reaction toolset, and only the sessions it serves. The
+    probe is the tool's own (``adapter_supports_reactions``), so the schema a session gets promises
+    exactly what a call from that session can deliver."""
+    from tools.react_to_message_tool import MESSAGING_REACTIONS_TOOLSET, adapter_supports_reactions
+    return {MESSAGING_REACTIONS_TOOLSET} if adapter_supports_reactions(adapter) else set()
 
 
 def _bg_prompt_preview(prompt: str, limit: int = 60) -> str:
@@ -1961,8 +1971,10 @@ class GatewayTurnMixin:
             # /loop and /goal hooks that read the return value.
             with suppress(Exception):
                 event._streamed_final_response = str(response or "")
+            (getattr(event, "_gateway_turn_timing", None) or current_turn_timing()).finish_delivery()
             return None
 
+        (getattr(event, "_gateway_turn_timing", None) or current_turn_timing()).finish_delivery()
         return response
 
     # Chat-side next steps keyed by HTTP status; Hermes commands only (/login is the gateway's own
@@ -1985,6 +1997,7 @@ class GatewayTurnMixin:
             # Context overflow / payload too large: a deterministic rejection (#107567), and the same
             # no-grow rule as the persist path (#1630) — nothing is written into an oversized session.
             from gateway.run import _CONTEXT_OVERFLOW_REPLY
+            current_turn_timing().log_terminal()
             return _CONTEXT_OVERFLOW_REPLY
         # Replay can coalesce inputs; only this input's durable marker establishes ownership.
         try:
@@ -2024,6 +2037,7 @@ class GatewayTurnMixin:
                 status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
         elif status_code == 400:
             status_hint = " The AI model service rejected the request."
+        current_turn_timing().log_terminal()
         return self._hmwa_add_failed_turn_notice(
             f"⚠️ Something went wrong and I couldn't finish this reply.{status_hint}\n"
             "Use /retry to try again, or /new to start a fresh conversation. "
@@ -2177,7 +2191,8 @@ class GatewayTurnMixin:
                 "session_id": session_entry.session_id,
                 "message": message_text[:500],
             }
-            await self.hooks.emit("agent:start", hook_ctx)
+            _hook_results = await self.hooks.emit_collect("agent:start", hook_ctx)
+            self._hmwa_apply_turn_hook_notes(session_key, _hook_results)
 
             # Capture the launch session id so post-run compression publication is identity-guarded
             # (a /new may move session_entry.session_id while the old run is still unwinding).
@@ -2223,6 +2238,30 @@ class GatewayTurnMixin:
             if not self._is_session_run_current(_quick_key, run_generation):
                 self._hmwa_discard_stale_result(source, _quick_key, run_generation)
                 return None
+
+            # LAB-61: optional Jev completion score before claiming done / delivering.
+            # Fail-open; low-confidence / contradiction / non-done → HITL flags on the result.
+            # The consumer reads hitl_escalation and registers a clarify ask (default-off
+            # gate lives in the verifier; no flag means this call is a no-op).
+            if isinstance(agent_result, dict):
+                try:
+                    from gateway.run_turn_jev_completion import maybe_verify_turn_completion
+                    from gateway.run import _load_gateway_config, _terminal_scope_cwd
+                    from gateway.jev_completion_hitl import consume_hitl_escalation
+
+                    agent_result = maybe_verify_turn_completion(
+                        agent_result,
+                        user_config=_load_gateway_config(),
+                        chat_id=getattr(source, "chat_id", None),
+                        session_id=getattr(session_entry, "session_id", None) or _run_start_session_id,
+                        cwd=_terminal_scope_cwd(),
+                    )
+                    consume_hitl_escalation(
+                        agent_result,
+                        session_key=_quick_key or session_key,
+                    )
+                except Exception as _jev_comp_exc:
+                    logger.debug("jev_completion gate skipped: %s", _jev_comp_exc)
 
             response, _intentional_silence, agent_messages = await self._hmwa_shape_agent_response(
                 agent_result, source, history, session_entry, session_key,
@@ -2380,8 +2419,11 @@ class GatewayTurnMixin:
     ) -> list:
         """Enabled toolsets for an agent run, honoring an adapter ``toolsets_for_source()`` override
         validated through the SAME ``_get_platform_tools`` path (unknown / platform-restricted
-        toolsets dropped, not trusted)."""
+        toolsets dropped, not trusted), plus the session's own surface
+        (``_surface_toolsets_for_source``): a client capability only this turn's adapter can answer
+        never travels in the shared platform config."""
         from hermes_cli.tools_config import _get_platform_tools
+        adapter = None
         try:
             adapter = self._delivery_adapter_for(source)
             override = adapter.toolsets_for_source(source) if adapter is not None else None
@@ -2391,7 +2433,8 @@ class GatewayTurnMixin:
             pts = dict(user_config.get("platform_toolsets") or {})
             pts[platform_key] = [str(x) for x in override]
             user_config = {**user_config, "platform_toolsets": pts}
-        return sorted(_get_platform_tools(user_config, platform_key))
+        enabled = _get_platform_tools(user_config, platform_key) | _surface_toolsets_for_source(adapter)
+        return sorted(enabled)
 
     def _resolve_turn_toolsets(self, user_config: dict, source: "SessionSource", platform_key: str):
         """``(enabled_toolsets, disabled_toolsets)`` for an agent run on ``source``."""
@@ -2723,12 +2766,20 @@ class GatewayTurnMixin:
         if _scfg is None:
             from gateway.config import StreamingConfig
             _scfg = StreamingConfig()
-        # Global master switch first: skips the config.yaml re-read on the default (off) path.
-        if not _scfg.globally_enabled:
-            return None
-        from gateway.display_config import resolve_display_setting
-        _plat_streaming = resolve_display_setting(_load_gateway_config(), _platform_config_key(source.platform), "streaming")
-        if not _scfg.enabled_for(_plat_streaming):
+        # Chat-type-aware resolution (gateway/display_config.py): operator config →
+        # platform tier default → the Telegram root-DM default → the top-level master
+        # switch. The DM default is the one carve-out to the master switch, and it is
+        # deliberate: a root DM streams with no configuration at all. It still yields to
+        # ``transport: off`` and to any explicit per-platform value. Supersedes the older
+        # ``resolve_display_setting(..., "streaming")`` + ``StreamingConfig.enabled_for``
+        # pair, which could not see the session's chat type and so could not express it.
+        from gateway.display_config import resolve_session_streaming
+        _streaming_enabled = resolve_session_streaming(
+            _load_gateway_config(), _platform_config_key(source.platform),
+            getattr(source, "chat_type", None),
+            master_enabled=_scfg.enabled and _scfg.transport != "off", transport=_scfg.transport,
+        )
+        if not _streaming_enabled:
             return None
         try:
             from gateway.stream_consumer import GatewayStreamConsumer
@@ -3346,6 +3397,19 @@ class GatewayTurnMixin:
                 if not _adapter:
                     continue
                 if hasattr(_adapter, 'has_pending_interrupt') and _adapter.has_pending_interrupt(session_key):
+                    _pending = getattr(_adapter, "_pending_messages", {}).get(session_key)
+                    # Queue-mode text is deliberately revealed only after its debounce quiet
+                    # window.  Permit that batch to replace the original draft once, then let
+                    # later bubbles accumulate for the terminal response.  Re-interrupting the
+                    # recursive follow-up on every correction is what exhausts active-turn
+                    # redirect restart limits and leaks stale drafts.
+                    if (
+                        source.platform == Platform.TELEGRAM
+                        and getattr(_adapter, "_busy_text_mode", "interrupt") == "queue"
+                        and getattr(_pending, "_gateway_busy_text_debounced", False)
+                        and turn_ctx._interrupt_depth > 0
+                    ):
+                        continue
                     agent = agent_holder[0]
                     if agent:
                         await self._run_agent_fire_pending_interrupt(
@@ -3791,6 +3855,17 @@ class GatewayTurnMixin:
         )
         logger.debug("Processing pending message: '%s...'", pending[:40])
 
+        # The conversation loop's cancellation result is an internal diagnostic.  It can
+        # still carry the legacy literal marker when a later Telegram correction arrives
+        # during generation; never let that diagnostic become the queued chain's final
+        # deliverable.  Keep transcript/result metadata intact and run the last-mile
+        # voice guard so markers, canned scaffolding, and em dashes cannot leak here.
+        from gateway.delivery_voice import final_delivery_voice_check
+        if result.get("interrupted") and isinstance(response, str):
+            response = final_delivery_voice_check(response)
+        if isinstance(result, dict) and result.get("interrupted") and isinstance(result.get("final_response"), str):
+            result = {**result, "final_response": final_delivery_voice_check(result["final_response"])}
+
         # Clear the interrupt event so the recursive _run_agent isn't re-interrupted (infinite loop).
         _active = getattr(adapter, "_active_sessions", None) if adapter else None
         if _active and session_key and session_key in _active:
@@ -3811,7 +3886,15 @@ class GatewayTurnMixin:
             return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
 
         # Interrupted: discard the response ("Operation interrupted." is noise).
-        if not result.get("interrupted"):
+        # A debounced Telegram queue batch is a replacement intent, not an independent
+        # request.  If another batch is waiting, keep this intermediate draft private and
+        # recurse once more; the terminal turn is the only user-visible response.
+        _replace_stale_draft = bool(
+            pending_event is not None
+            and getattr(pending_event, "_gateway_busy_text_debounced", False)
+            and getattr(getattr(pending_event, "source", None), "platform", None) == Platform.TELEGRAM
+        )
+        if not result.get("interrupted") and not _replace_stale_draft:
             await self._run_agent_deliver_first_response(turn_ctx, adapter, response, result, stream_task)
 
         updated_history = result.get("messages", history)
@@ -3982,7 +4065,16 @@ class GatewayTurnMixin:
         """Edit the stream consumer's message in place with ``content``; on success mark
         ``response["already_sent"]`` and log ``ok``. A returned failure logs ``fail_result`` as
         ``(session, error)`` and an exception logs ``fail_exc`` as ``(session, exc)``; either way
-        ``already_sent`` stays unset so the normal final send delivers the content."""
+        ``already_sent`` stays unset so the normal final send delivers the content.
+
+        This edit is the user-facing replacement for the suppressed guarded final send,
+        so ``content`` crosses the same last-mile check (em/en dashes, canned
+        scaffolding, internal markers) as ``send_final_ledgered``: the draft frames were
+        already dash-normalized, but the reconcile edit writes the RAW completed
+        response, and an unguarded dash would ship exactly on this seam. Every caller
+        passes a real ``fail_result`` format string; there is no None-means-trust path."""
+        from gateway.delivery_voice import final_delivery_voice_check
+        content = final_delivery_voice_check(content)
         try:
             _res = await _sc.adapter.edit_message(
                 chat_id=source.chat_id, message_id=_sc.message_id, content=content, finalize=True,

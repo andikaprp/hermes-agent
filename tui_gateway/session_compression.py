@@ -75,6 +75,11 @@ def _derived_default_threshold_percent(agent: Any, compression: dict) -> float:
 
 
 # (config key == compressor attr, ctor-default fallback, min_value)
+# compression.semantic_pins, compression.visibility_ladder, and
+# compression.cache_reuse_decision are intentionally not in this live-apply
+# table. They are init-consumed. compression.threshold IS applied here, which
+# conflicts with the init-consumed docs for that older key; that conflict is
+# unchanged.
 _COMPRESSION_INT_KEYS = (
     ("proactive_prune_tokens", 0, 0),
     ("proactive_prune_min_result_chars", 8000, 0),

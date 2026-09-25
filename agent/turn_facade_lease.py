@@ -72,9 +72,13 @@ class DurableTurnLease:
     def start(self) -> None:
         with self._lock:
             self.turn_active = True
-        # Stamp the activity clock at turn entry: `_last_activity_ts` persists across turns, so
-        # without this the watchdog would measure idle from the PREVIOUS turn and abort a fresh one.
-        self.agent._touch_activity("starting new turn")
+        # Preserve the pre-stamp activity clock for idle compaction: `_idle_compaction` runs later
+        # in this same turn (inside build_turn_context), after this stamp would otherwise zero the
+        # gap. Stamp `_last_activity_ts` at turn entry so the liveness watchdog does not measure
+        # idle from the PREVIOUS turn and abort a fresh one.
+        agent = self.agent
+        agent._turn_start_idle_base_ts = getattr(agent, "_last_activity_ts", None)
+        agent._touch_activity("starting new turn")
         from agent.periodic_scheduler import schedule
 
         self.timer_handles.append(schedule(self.refresh_tick, self.refresh_interval))

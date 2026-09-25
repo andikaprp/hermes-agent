@@ -742,6 +742,19 @@ def _dynamic_schema_overrides() -> dict:
                             "accounts, their sessions. No-op when the backend is already local. Default false."),
         }
         overrides["parameters"] = {**BROWSER_EXEC_SCHEMA["parameters"], "properties": props}
+    jev = schema_override_fn("browser", BROWSER_EXEC_SCHEMA)()
+    if not isinstance(jev, dict):
+        return overrides
+    params = dict(overrides.get("parameters") or BROWSER_EXEC_SCHEMA["parameters"])
+    merged = dict(params.get("properties") or {})
+    for key in ("jev_action_id", "jev_goal", "jev_candidates", "jev_regions"):
+        merged[key] = jev["parameters"]["properties"][key]
+    params["properties"] = merged
+    overrides["parameters"] = params
+    overrides["description"] = overrides["description"] + (
+        " Jev action gate is enabled: mutating actions do not execute unless "
+        "jev_action_id is approved by Jev from jev_candidates."
+    )
     return overrides
 
 
@@ -767,6 +780,7 @@ BROWSER_EXEC_SCHEMA = {
 # lack ``terminal`` never see it (model_tools._compute_tool_definitions). check_fn only
 # answers "is Browser Use mode configured"; surface policy lives with the session.
 from tools.registry import registry
+from gateway.jev_action_gate import schema_override_fn
 
 registry.register(
     name="browser_exec",

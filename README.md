@@ -226,6 +226,52 @@ for activation, daily use, dependency changes, and leaving the environment.
 
 ---
 
+## Jev decision store
+
+jev-decisions.jsonl is the decision store for native Jev observability
+(`gateway.jev_observability`, default off). It lives at `logs/jev-decisions.jsonl`.
+The dashboard GET routes (`/api/jev/decisions`, `/api/jev/observability`) are a
+read-only local view of that file and the in-process ring. They do not tail
+`gateway.log`, and nothing is sent off-box. The file rotates with stdlib
+max-bytes rollover to `.1`.
+
+---
+
+## Jev call budgets
+
+System One calls share one keep-alive HTTPS connection
+(`agent/jev_transport.py`). A dead socket is closed and retried once; the
+second failure uses the existing fail-safe (routing stays on the normal lane,
+gates fail open or reobserve). An `HTTPS_PROXY` / `HTTP_PROXY` environment
+keeps the fresh httpx client so proxied installs do not change behavior.
+
+Per-call timeout defaults live in the existing config blocks. No new
+`HERMES_*` variables. Override `timeout_seconds` in config.yaml to change one.
+
+| Surface | Config | Default |
+| --- | --- | --- |
+| routing | `gateway.telegram.jev_routing.timeout_seconds` | 4s |
+| quality gate | `gateway.telegram.fast_lane.quality_gate.timeout_seconds` | 1.5s |
+| memory triage | `memory.jev_triage.timeout_seconds` | 5s |
+| skill routing | `agent.skill_routing.timeout_seconds` | 5s |
+| delegate gate | `delegation.jev_check.timeout_seconds` | 5s |
+| completion | `gateway.jev_completion.timeout_seconds` | 10s |
+| review triage | `code_review.jev_triage.timeout_seconds` | 15s |
+| action gate | `computer_use.jev_action_gate` / `browser.jev_action_gate` | 3s |
+| compression scorer | `compression.jev_scorer.timeout_seconds` | 30s |
+
+The quality-gate budget stays at 1.5s, tighter than a 4s ceiling, so a slow
+check cannot stall the fast lane. The compression scorer stays at 30s because
+it runs off the turn hot path in fan-out batches. The action gate stays at 3s.
+
+Exact-repeat decisions are cached under `jev.decision_cache` (default on,
+TTL 3600s, 512 LRU entries). The key is the payload content hash plus the
+serialized question spec. Set `enabled: false` or `ttl_seconds: 0` to disable.
+An identical payload and question returns the recorded decision with no
+network call.
+
+---
+
 ## Community
 
 - 💬 [Discord](https://discord.gg/NousResearch)

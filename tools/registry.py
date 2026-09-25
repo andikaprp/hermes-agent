@@ -898,6 +898,12 @@ class ToolRegistry:
         if not entry:
             return tool_error(f"Unknown tool: {name}")
         try:
+            if name == "computer_use" or (isinstance(name, str) and name.startswith("browser")):
+                # Disabled gate: prepare returns the same args and does not call Jev.
+                from gateway.jev_action_gate import prepare_gated_execution
+                block, args = prepare_gated_execution(name, args)
+                if block is not None:
+                    return block
             # Plugin contract (plugins/AGENTS.md): optional context kwargs (task_id, session_id, user_task,
             # parent_agent, ...) are signature-inspected like hook payloads, so a narrow ``handle(args)``
             # plugin handler is not broken by every field the dispatcher injects (#68318).

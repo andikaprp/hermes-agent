@@ -7,6 +7,7 @@ from tools.computer_use.schema import COMPUTER_USE_SCHEMA
 from tools.computer_use.tool import (
     check_computer_use_requirements, handle_computer_use, release_computer_use_session, set_approval_callback,
 )
+from gateway.jev_action_gate import schema_override_fn
 from tools.registry import registry
 
 
@@ -23,6 +24,7 @@ registry.register(
         "etc.). Background computer-use: does NOT steal the user's cursor "
         "or keyboard focus."
     ),
+    dynamic_schema_overrides=schema_override_fn("computer_use", COMPUTER_USE_SCHEMA),
 )
 
 

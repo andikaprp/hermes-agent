@@ -485,6 +485,56 @@ def record_verify_run(
     ))
 
 
+def record_jev_completion_verdict(
+    *,
+    session_id: str | None = None,
+    cwd: str | Path | None = None,
+    verdict: str,
+    confidence: float | None = None,
+    result_hash: str = "",
+    evidence_status: str = "",
+    decision: str = "",
+    reason: str = "",
+) -> Optional[dict[str, Any]]:
+    """Record a LAB-61 Jev completion verdict into the existing ledger.
+
+    Writes even when verify-on-stop is off: the completion gate owns this row.
+    Payload is metadata/hashes only — never raw prompts or reply bodies.
+    """
+    # Open/create the DB for this write path even if verify-on-stop is disabled.
+    sid = str(session_id or "default")
+    work = Path(cwd).resolve() if cwd else get_hermes_home()
+    facts = _project_facts(work)
+    root = _root_for(facts, work) if facts else str(work)
+    summary = json.dumps(
+        {
+            "verdict": str(verdict or ""),
+            "confidence": None if confidence is None else round(float(confidence), 4),
+            "result_hash": str(result_hash or "")[:32],
+            "evidence_status": str(evidence_status or "")[:32],
+            "decision": str(decision or "")[:32],
+            "reason": str(reason or "")[:64],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    status_map = {"done": "passed", "partial": "partial", "failed": "failed"}
+    status = status_map.get(str(verdict or "").strip().lower(), "partial")
+    exit_code = {"passed": 0, "partial": 2, "failed": 1}.get(status, 2)
+    return _insert_evidence(VerificationEvidence(
+        command="jev_completion",
+        canonical_command="jev_completion",
+        kind="jev_completion",
+        scope="full",
+        status=status,
+        exit_code=exit_code,
+        cwd=str(work),
+        root=root,
+        session_id=sid,
+        output_summary=_summarize_output(summary),
+    ))
+
+
 def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
     """Insert a classified evidence row and repoint the workspace state."""
     created_at = _utc_now()

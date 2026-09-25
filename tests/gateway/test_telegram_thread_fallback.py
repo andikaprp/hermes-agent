@@ -298,8 +298,8 @@ def test_base_gateway_metadata_marks_telegram_dm_topics_as_reply_fallback():
 
 
 @pytest.mark.asyncio
-async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegram_dm_topic(monkeypatch, tmp_path):
-    """GatewayRunner's duplicate thread metadata must match the base helper."""
+async def test_gateway_runner_busy_ack_preserves_explicit_telegram_dm_reply_anchor(monkeypatch, tmp_path):
+    """GatewayRunner's duplicate thread metadata must preserve an explicit reply anchor."""
     from gateway import run as gateway_run
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
@@ -351,12 +351,12 @@ async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegra
     assert await runner._handle_active_session_busy_message(event, session_key) is True
 
     assert adapter.calls
-    assert adapter.calls[0]["reply_to"] == "463"
+    assert adapter.calls[0]["reply_to"] == "462"
     assert adapter.calls[0]["metadata"] == {
         "thread_id": "20197",
         "telegram_dm_topic_reply_fallback": True,
         "direct_messages_topic_id": "20197",
-        "telegram_reply_to_message_id": "463",
+        "telegram_reply_to_message_id": "462",
     }
 
 

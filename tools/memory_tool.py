@@ -204,6 +204,38 @@ def _background_delete_gate(store, action, operations, target="memory", content=
             "batch); 'add' is still available.", success=False)
 
 
+def _jev_triage_skip_add(target: str, content: Optional[str]) -> Optional[str]:
+    """Optional Jev noul gate before a durable ``add``. JSON skip result, or None to write."""
+    try:
+        from tools.memory_jev_triage import skipped_add_tool_result, triage_memory_add
+    except Exception:
+        return None
+    triage = triage_memory_add(content or "", target=target)
+    if triage.allow_write:
+        return None
+    return json.dumps(skipped_add_tool_result(target, content or "", triage), ensure_ascii=False)
+
+
+def _filter_batch_adds_via_jev(target: str, operations: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Drop proposed batch ``add`` ops that fail Jev triage. Returns (kept, skipped)."""
+    kept: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for op in operations:
+        if not isinstance(op, dict) or op.get("action") != "add":
+            kept.append(op)
+            continue
+        text = op.get("content") or op.get("new_text") or ""
+        skip_json = _jev_triage_skip_add(target, text)
+        if skip_json is None:
+            kept.append(op)
+            continue
+        try:
+            skipped.append(json.loads(skip_json))
+        except Exception:
+            skipped.append({"success": True, "skipped": True, "reason": "below_threshold"})
+    return kept, skipped
+
+
 def memory_tool(action: str = None, target: str = "memory", content: str = None, old_text: str = None,
                 new_text: str = None, operations: Optional[List[Dict[str, Any]]] = None,
                 store: Optional[MemoryStore] = None) -> str:
@@ -230,7 +262,20 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
         gate_result = _apply_write_gate(store, "batch", target, None, None, operations)
         if gate_result is not None:
             return gate_result
-        return json.dumps(store.apply_batch(target, operations), ensure_ascii=False)
+        kept, triage_skipped = _filter_batch_adds_via_jev(target, operations)
+        if not kept:
+            return json.dumps({
+                "success": True,
+                "skipped": True,
+                "target": target,
+                "message": "Jev memory triage skipped all proposed add operations.",
+                "skipped_ops": triage_skipped,
+            }, ensure_ascii=False)
+        result = store.apply_batch(target, kept)
+        if triage_skipped:
+            result = dict(result)
+            result["jev_triage_skipped"] = triage_skipped
+        return json.dumps(result, ensure_ascii=False)
     if action not in _STORE_ACTIONS:
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
     invalid = (_validate_single_op(store, action, target, content, old_text)
@@ -238,6 +283,10 @@ def memory_tool(action: str = None, target: str = "memory", content: str = None,
                or _apply_write_gate(store, action, target, content, old_text))
     if invalid is not None:
         return invalid
+    if action == "add":
+        skipped = _jev_triage_skip_add(target, content)
+        if skipped is not None:
+            return skipped
     return json.dumps(_STORE_ACTIONS[action][0](store, target, content, old_text), ensure_ascii=False)
 
 

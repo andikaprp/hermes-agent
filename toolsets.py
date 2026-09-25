@@ -100,7 +100,7 @@ TOOLSETS = {
         "Background desktop control via cua-driver (macOS/Windows/Linux) — "
         "screenshots, mouse, keyboard, scroll, drag. Does NOT steal the user's cursor "
         "or keyboard focus. Works with any tool-capable model.",
-        ["computer_use"],
+        ["computer_use", "jev_choose_action"],
     ),
     "terminal": _ts("Terminal/command execution and process management tools", ["terminal", "process_manage"]),
     "skills": _ts(
@@ -115,7 +115,7 @@ TOOLSETS = {
     "browser": _ts(
         "Browser automation for web interaction (navigate, click, type, scroll, "
         "iframes, hold-click)",
-        [t for t in _HERMES_CORE_TOOLS if t.startswith("browser_")],
+        [t for t in _HERMES_CORE_TOOLS if t.startswith("browser_")] + ["jev_choose_action"],
     ),
     "cronjob": _ts(
         "Cronjob management tool - create, list, update, pause, resume, remove, and "
@@ -156,6 +156,14 @@ TOOLSETS = {
         ["manage_catalog"],
         role="setup",
     ),
+    # One emoji reaction on the user's message. Folded in per SESSION by the resolver that can
+    # answer for the surface: the GUI gateway for desktop sessions (which also keep naming the tool
+    # in ``desktop_ui`` above — a GUI session is a reaction surface too), the gateway runner for a
+    # chat platform whose live adapter implements the reaction API. The tool
+    # (tools/react_to_message_tool.py) registers itself into this toolset, so the registry owns its
+    # membership — never a process env var, which is blind to who is on the other end.
+    "message_reactions": _ts(
+        "A single emoji reaction on the user's message (chat platforms with reaction support)"),
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
     "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),

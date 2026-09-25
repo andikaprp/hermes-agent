@@ -329,7 +329,13 @@ def _auto_load_parts(agent: Any) -> List[str]:
         try:
             if not is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")):
                 from agent.skill_commands import build_auto_load_prompt
-                result = build_auto_load_prompt(task_id=getattr(agent, "session_id", None), home_override=_agent_home(agent))
+                # First inbound task (stashed at turn start) so optional Jev skill
+                # routing can decide before the session skill set is committed.
+                result = build_auto_load_prompt(
+                    task_id=getattr(agent, "session_id", None),
+                    home_override=_agent_home(agent),
+                    task_text=getattr(agent, "_skill_route_task", None),
+                )
             if result[2]:
                 logger.warning("skills.auto_load: skill(s) not found or disabled, skipped: %s", ", ".join(result[2]))
         except Exception:

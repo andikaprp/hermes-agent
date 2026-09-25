@@ -38,6 +38,16 @@ DEFAULT_CONFIG = {
     },
     # Soft fd limit for long-running server processes; clamped to OS hard limit. 0/false/null = off.
     "runtime": {"nofile_soft_limit": 4096},
+    # Shared System One transport. decision_cache is exact-repeat only
+    # (content hash + question spec). Default on; set enabled false or
+    # ttl_seconds 0 to disable. No new environment variables.
+    "jev": {
+        "decision_cache": {
+            "enabled": True,
+            "ttl_seconds": 3600,
+            "max_entries": 512,
+        },
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging. None/0 = unbounded.
     "max_concurrent_sessions": None,
     # Soft LRU cap on in-memory TUI/desktop/dashboard sessions. Above it the gateway evicts the
@@ -272,6 +282,16 @@ DEFAULT_CONFIG = {
         # timeout_s <= 0 disables; poll_s = sampling interval. Invalid values (NaN, Inf,
         # non-positive poll) warn and fall back to defaults. See agent/turn_liveness.py.
         "turn_liveness": {"timeout_s": 600.0, "poll_s": 15.0},
+        # Optional TypeSafe Jev skill selection at session setup (default OFF). When enabled AND
+        # TYPESAFE_API_KEY is set, a Choice over top candidate skills may replace skills.auto_load
+        # before the session skill set is committed. Confidence below threshold / any failure /
+        # missing key keeps today's auto_load behavior. Never mid-conversation (prompt-cache safe).
+        "skill_routing": {
+            "enabled": False,
+            "threshold": 0.85,
+            "model": "jev-latest",
+            "timeout_seconds": 5,
+        },
     },
 
     "terminal": {
@@ -445,6 +465,18 @@ DEFAULT_CONFIG = {
         # is the legacy override that bypasses that denylist entirely.
         "allow_unsafe_evaluate": False,
         "restrict_evaluate": False,
+        # Optional TypeSafe Jev action gate (LAB-60). OFF by default: disabled
+        # means computer/browser tools are unchanged (no Jev call). When enabled,
+        # a mutating action does not execute unless Jev returns its approved
+        # action id; errors/timeouts/low confidence/missing key reobserve and
+        # the tool call does not run. Chosen actions still pass existing approval
+        # / risk gates.
+        "jev_action_gate": {
+            "enabled": False,
+            "threshold": 0.65,
+            "model": "jev-latest",
+            "timeout_seconds": 3,
+        },
         # CDP supervisor: dialog + frame detection over a persistent WebSocket; active only with a
         # CDP-capable backend (Browserbase, or local Chrome via /browser connect). See
         # website/docs/developer-guide/browser-supervisor.md.
@@ -671,6 +703,41 @@ DEFAULT_CONFIG = {
         # already at/below threshold × target_ratio; honors the same cooldown/ anti-thrash/lock
         # guards. Example: 1800 = 30 min.
         "idle_compact_after_seconds": 0,
+        # Optional TypeSafe Jev keep-priority scorer (default OFF). When enabled AND
+        # TYPESAFE_API_KEY is set in .env, the compressor scores the compressible middle
+        # window with Jev before the existing summarizer runs. Any Jev error / timeout /
+        # 429 / missing key falls back to the unchanged compression path.
+        "jev_scorer": {
+            "enabled": False,
+            # Keep messages with score >= this (0=drop, 1=background, 2=must-keep).
+            # 1.2 keeps background+; only clearly-droppable spans are demoted.
+            "keep_threshold": 1.2,
+            # Fan-out batch size (state array + one score question per index).
+            "batch_size": 40,
+            "model": "jev-latest",
+            "timeout_seconds": 30,
+        },
+        # Semantic do-not-shrink pins (default OFF, init-consumed). A marked span
+        # survives compaction verbatim independent of protect_first_n,
+        # protect_last_n, and the Jev keep score. Closed class set only.
+        # Not in the gateway cache-busting table and not TUI-hot-reloaded.
+        # See website/docs/developer-guide/context-compression-and-caching.md.
+        "semantic_pins": {
+            "enabled": False,
+            "classes": ["active_task", "goal_scaffold", "standing_instruction"],
+        },
+        # Query-aware visibility ladder (default OFF, init-consumed). Four levels:
+        # hidden (not sent), short, long, full. Items move between levels; they
+        # are not deleted. Scoring is slow_path_only or async_precompute, never
+        # on the fast-lane hot path.
+        "visibility_ladder": {
+            "enabled": False,
+            "scoring": "slow_path_only",
+        },
+        # Deliberate non-adoption. MUST stay false. LAB-52 says never mutate the
+        # cached prefix; AGENTS.md says prompt caching is sacred; measured
+        # steady-state prompt-cache hit rate is about 99 percent.
+        "cache_reuse_decision": False,
     },
     # Anthropic prompt caching (Claude via OpenRouter or native API). cache_ttl: "5m" | "1h" | "auto"
     # (auto = 1h for human-paced sessions — cli/tui/desktop/messaging — and 5m for subagent, cron,
@@ -1297,6 +1364,32 @@ DEFAULT_CONFIG = {
         # External memory provider plugin (empty = built-in only); only ONE at a time: "openviking",
         # "mem0", "holographic", "retaindb", "byterover", or a catalog-installed one ("hindsight").
         "provider": "",
+        # Optional TypeSafe Jev noul triage before durable memory ``add`` (default OFF).
+        # When enabled AND TYPESAFE_API_KEY is set, proposed entry text is scored; below
+        # threshold skips the write. Any failure / missing key / short pre-filter writes as today.
+        "jev_triage": {
+            "enabled": False,
+            "threshold": 0.75,
+            "model": "jev-latest",
+            "timeout_seconds": 5,
+            # Skip the ~0.5–1s Jev call for short entries (hot path stays cheap).
+            "min_chars": 40,
+        },
+    },
+    # Optional TypeSafe Jev PR review triage (default OFF). When enabled AND TYPESAFE_API_KEY
+    # is set, grades review comment sets + diff metadata into approve / request-changes /
+    # needs-human with confidence. Below-threshold confidence always becomes needs-human
+    # (never auto-approves). Posts at most one commentary comment per PR; never submits
+    # GitHub APPROVE — the human review gate stays.
+    "code_review": {
+        "jev_triage": {
+            "enabled": False,
+            "threshold": 0.85,
+            "model": "jev-latest",
+            "timeout_seconds": 15,
+            # Bound the raw diff excerpt in Jev state (hashes/metadata carry the rest).
+            "max_diff_chars": 12000,
+        },
     },
     # Subagent delegation — override the provider:model used by delegate_task so children run on a
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
@@ -1366,6 +1459,16 @@ DEFAULT_CONFIG = {
         # notifications to the PARENT; false suppresses them (the child's result is the
         # deliverable). Async-delegation results are NEVER suppressed.
         "surface_child_process_notifications": False,
+        # Optional TypeSafe Jev gate before spawn (default OFF). When enabled AND
+        # TYPESAFE_API_KEY is set, System One answers "delegate" vs "do_directly" for the
+        # pending task description. High-confidence "do_directly" skips the spawn; below
+        # threshold / timeout / any failure keeps today's spawn path.
+        "jev_check": {
+            "enabled": False,
+            "threshold": 0.8,
+            "model": "jev-latest",
+            "timeout_seconds": 5,
+        },
     },
     # Ephemeral prefill messages file — JSON list of {role, content} dicts injected at the start of
     # every API call for few-shot priming. Never saved to sessions/logs/trajectories.
@@ -2079,6 +2182,17 @@ DEFAULT_CONFIG = {
         # boot (ambiguous cases carry a "recovered reply — may be a duplicate" marker;
         # at-least-once). Disable to lose in-flight final responses on crash/restart.
         "delivery_ledger": True,
+        # Optional TypeSafe Jev completion verification before a turn is claimed
+        # done/delivered (LAB-61 Canny-style; default OFF). Scores done/partial/failed
+        # from result hashes + verification_evidence metadata (never raw prompts).
+        # Fail-open on missing key / timeout / errors; low confidence, evidence
+        # contradiction, or confident non-done escalates to HITL (never auto-claims done).
+        "jev_completion": {
+            "enabled": False,
+            "threshold": 0.75,
+            "model": "jev-latest",
+            "timeout_seconds": 10,
+        },
         # Seconds to wait for one platform to connect at startup/reconnect; raise on "discord
         # connect timed out" loops (many slash commands to sync). 0/negative = wait forever. Bridged
         # to HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT, which wins if set explicitly.
@@ -2167,6 +2281,60 @@ DEFAULT_CONFIG = {
         # supervisor can't hammer the process. max_starts <= 0 disables. Env escape hatches:
         # HERMES_GATEWAY_MAX_STARTS / HERMES_GATEWAY_START_WINDOW_S.
         "respawn_storm": {"max_starts": 5, "window_seconds": 120},
+        # Telegram DM no-task fast path (LAB-3). When true, a bare ack or greeting in a Telegram
+        # DM gets an advisory note asking the model for one short reply with no tools. The tool
+        # schema stays on the wire (prompt-cache invariant; a misroute degrades to "the model
+        # ignored a hint", never dropped work). False = every DM turn enters the full agentic
+        # loop. Default on. The gateway does not merge DEFAULT_CONFIG, so the reader treats a
+        # missing key as enabled; set false here to disable without a code change.
+        # fast_lane (LAB-52): when enabled, eligible turns first try a SEPARATE compact-context
+        # provider call (minimal system + last N messages) before the one-hop full-session path.
+        # Empty provider/model inherit the session's main runtime. Failures / TTFT over
+        # ttft_budget_ms fall back to the LAB-3 one-hop path unchanged.
+        "telegram": {
+            "fast_path": True,
+            "fast_lane": {
+                "enabled": True,
+                "provider": "",
+                "model": "",
+                "max_messages": 6,
+                "max_chars": 2000,
+                "ttft_budget_ms": 8000,
+                "sticky_seconds": 0,
+                "escalate_oversized": True,
+                # Optional TypeSafe Jev check on the lane DRAFT before send
+                # (default OFF). Fail-open: missing key / timeout / errors send
+                # the draft; only a confident escalate falls back to the one-hop path.
+                "quality_gate": {
+                    "enabled": False,
+                    "threshold": 0.7,
+                    "model": "jev-latest",
+                    "timeout_seconds": 1.5,
+                },
+            },
+            # Optional TypeSafe Jev second opinion for uncertain fast-path turns
+            # (default OFF). When enabled AND TYPESAFE_API_KEY is set, only the
+            # classifier's uncertain band calls Jev; confidence below threshold /
+            # any failure keeps today's deterministic routing.
+            "jev_routing": {
+                "enabled": False,
+                "threshold": 0.85,
+                "model": "jev-latest",
+                "timeout_seconds": 4,
+                "verdict_cache_ttl_seconds": 0,
+                "breaker_trips": 3,
+                "breaker_cooldown_seconds": 30,
+            },
+        },
+        # LAB-59: local Jev decision observability (default OFF). shadow/on append
+        # metadata-only rows to <hermes_home>/logs/jev-decisions.jsonl, which is
+        # THE decision store (stdlib max-bytes rollover to .1). The dashboard
+        # GET routes are a read-only local view; nothing is sent off-box.
+        # off = no recording.
+        "jev_observability": {
+            "mode": "off",  # off | shadow | on
+            "limit": 200,
+        },
         # Prefix user messages IN THE MODEL'S CONTEXT with a timestamp (e.g. "[Tue 2026-04-28
         # 13:40:53 CEST]") for temporal awareness. Persisted transcripts stay clean (timestamp is
         # message metadata regardless), so enabling later surfaces past send-times too.
@@ -2533,6 +2701,18 @@ DEFAULT_CONFIG = {
         # closed unless signed with the official com.trycua.driver identity. Only for local driver
         # development from source.
         "allow_unsigned_driver": False,
+        # Optional TypeSafe Jev action gate (LAB-60): pick next computer-use action from a
+        # pre-approved table with withheld context (goal + short labels only). OFF by
+        # default — disabled means no Jev call and today's execution path. When enabled,
+        # a mutating action does not execute unless Jev returns that action id;
+        # errors/timeouts/low confidence/missing key reobserve and the call does not
+        # run. Complements existing approval / risk gates, which still run after.
+        "jev_action_gate": {
+            "enabled": False,
+            "threshold": 0.65,
+            "model": "jev-latest",
+            "timeout_seconds": 3,
+        },
     },
     # Egress credential-injection proxy (iron-proxy) for remote terminal sandboxes (Docker today):
     # the sandbox sees opaque tokens and iron-proxy swaps in real credentials at egress, so a
@@ -2812,6 +2992,19 @@ OPTIONAL_ENV_VARS = {
         "Azure Foundry base URL (set via 'hermes model' for endpoint-specific config)",
         "Azure Foundry base URL", None, password=False),
     # ── Tool API keys ──
+    "TYPESAFE_API_KEY": _tool(
+        "TypeSafe API key for optional Jev keep-priority scoring during context compression "
+        "(compression.jev_scorer.enabled), optional gateway fast-path Jev routing "
+        "(gateway.telegram.jev_routing.enabled), the optional pre-spawn delegation gate "
+        "(delegation.jev_check), optional session-setup skill selection "
+        "(agent.skill_routing.enabled), optional durable-memory noul triage "
+        "(memory.jev_triage.enabled), optional PR review triage "
+        "(code_review.jev_triage.enabled), the computer/browser Jev action gate "
+        "(computer_use.jev_action_gate / browser.jev_action_gate), gateway turn "
+        "completion verification (gateway.jev_completion.enabled), optional semantic "
+        "do-not-shrink pins (compression.semantic_pins.enabled), and the optional "
+        "query-aware visibility ladder (compression.visibility_ladder.enabled)", 
+        "TypeSafe API key", "https://typesafe.ai/", advanced=True),
     "EXA_API_KEY": _tool("Exa API key for AI-native web search and contents", "Exa API key",
         "https://exa.ai/", tools=["web_search", "web_extract"]),
     "PARALLEL_API_KEY": _tool("Parallel API key for AI-native web search and extract",

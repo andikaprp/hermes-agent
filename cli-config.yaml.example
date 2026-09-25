@@ -51,6 +51,18 @@ plugins:
   # Raise this for large repositories or slow connections. Maximum: 3600.
   clone_timeout_seconds: 300
 
+# Jev (TypeSafe System One) transport
+# =============================================================================
+# Shared keep-alive client and exact-repeat decision cache. Default on.
+# Set enabled: false or ttl_seconds: 0 to disable. Per-surface timeout_seconds
+# budgets are documented in the README (routing 4s, quality gate 1.5s, memory
+# / skill / delegate 5s, completion 10s, review triage 15s).
+# jev:
+#   decision_cache:
+#     enabled: true
+#     ttl_seconds: 3600
+#     max_entries: 512
+
 # =============================================================================
 # Model Configuration
 # =============================================================================
@@ -706,6 +718,19 @@ compression:
   # count toward N. The tail can exceed the token budget when this pulls the
   # cut back; the guarantee wins over the budget by design.
   min_tail_user_messages: 1
+
+  # Optional TypeSafe Jev keep-priority scorer (default: false). When enabled and
+  # TYPESAFE_API_KEY is set in .env, the compressor scores the compressible
+  # middle window with Jev before the existing summarizer runs. Fan-out batches
+  # (~40 messages/request) ask one score question per index (0=drop, 1=background,
+  # 2=must-keep). keep_threshold 1.2 keeps background+. Any Jev error, timeout,
+  # 429, or missing key falls back to the unchanged compression path.
+  # jev_scorer:
+  #   enabled: false
+  #   keep_threshold: 1.2
+  #   batch_size: 40
+  #   model: jev-latest
+  #   timeout_seconds: 30
 
   # Compression retry rounds before a turn gives up with "max compression
   # attempts reached" (default: 3, same as the previous hardcoded value).
@@ -1408,6 +1433,10 @@ platform_toolsets:
 #     extra:
 #       drop_pending_on_cold_boot: true # Drop Telegram's queued updates on a cold boot (default). Set false on hosts that power off, so messages sent while offline are delivered on the next start; watcher reconnects always preserve them
 #       disable_link_previews: false  # Set true to suppress Telegram URL previews in bot messages
+#       # Seconds. Consecutive inbound bubbles in one chat within this window are one
+#       # burst; an agent reaction on a non-final bubble waits and lands on the final one.
+#       # No env var — config.yaml only. Default 2.0 when omitted.
+#       reaction_burst_window: 2.0
 #       rich_messages: false          # Bot API 10.1 rich messages (tables/task lists/details/math); default false for copyable legacy MarkdownV2, set true to opt in
 #       rich_drafts: false            # Experimental rich draft previews during Telegram DM streaming; default false because Telegram Desktop/macOS can visually overlay draft frames
 #       allow_cjk_rich_messages: false # Keep CJK content on the safe MarkdownV2 path unless an unaffected client explicitly opts in to native rich rendering
@@ -1786,6 +1815,14 @@ delegation:
   # fallback_providers:                       # Fallback chain for delegated children (same entry format as the
   #   - provider: "openrouter"                # top-level list). Pinned children use only a declared child chain;
   #     model: "deepseek/deepseek-chat"       # unpinned children inherit when unset. [] disables fallback (#65038).
+  # Optional TypeSafe Jev pre-spawn gate (default OFF). When enabled AND TYPESAFE_API_KEY
+  # is set, asks whether the parent should do the work directly vs spawn a subagent.
+  # High-confidence "do_directly" skips the spawn; timeout/failure keeps today's spawn path.
+  # jev_check:
+  #   enabled: false
+  #   threshold: 0.8
+  #   model: jev-latest
+  #   timeout_seconds: 5
 
 # =============================================================================
 # Honcho Integration (Cross-Session User Modeling)

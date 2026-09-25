@@ -676,6 +676,8 @@ _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     + ")",
     re.IGNORECASE)
 
+from gateway.delivery_voice import final_delivery_voice_check as _final_delivery_voice_check
+
 
 def _looks_like_gateway_provider_error(text: str) -> bool:
     """True when text is a provider failure envelope, not normal content.
@@ -716,14 +718,16 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
         text = text[:_eos_start].rstrip()
 
     # Cancellation metadata, not prose; ACP/TUI already suppress this sentinel, chat surfaces should too.
-    # See #7921.
-    if str(text).strip().startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX):
+    # See #7921.  The conversation loop may also return this exact legacy marker for a direct
+    # interrupted turn (before a queued Telegram correction is promoted); it is never a user reply.
+    stripped = str(text).strip()
+    if stripped.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX) or stripped.lower() == "[response interrupted]":
         return ""
 
     redacted = _redact_gateway_user_facing_secrets(str(text))
     if _looks_like_gateway_provider_error(redacted):
-        return _gateway_provider_error_reply(redacted)
-    return redacted
+        return _final_delivery_voice_check(_gateway_provider_error_reply(redacted))
+    return _final_delivery_voice_check(redacted)
 
 
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
@@ -2725,7 +2729,7 @@ _CONTROL_INTERRUPT_MESSAGES = frozenset({
     _INTERRUPT_REASON_STOP.lower(), _INTERRUPT_REASON_RESET.lower(),
     _INTERRUPT_REASON_TIMEOUT.lower(), _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
     _INTERRUPT_REASON_EVICTED.lower(), _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
-    _INTERRUPT_REASON_GATEWAY_RESTART.lower()})
+    _INTERRUPT_REASON_GATEWAY_RESTART.lower(), "[response interrupted]"})
 
 
 def _is_control_interrupt_message(message: Optional[str]) -> bool:
@@ -4364,6 +4368,12 @@ class GatewayRunner(
         ("compression", "proactive_prune_min_result_chars"),
         ("compression", "proactive_prune_min_reclaim_tokens"),
         ("compression", "min_tail_user_messages"), ("agent", "disabled_toolsets"),
+        # compression.semantic_pins, compression.visibility_ladder, and
+        # compression.cache_reuse_decision are intentionally absent. They are
+        # init-consumed (parsed in agent_init, stored on ContextCompressor), same
+        # boundary as compression.jev_scorer. This does not resolve the existing
+        # conflict for compression.threshold, which is listed here and also
+        # documented as consumed at agent init.
         ("memory", "provider"), ("checkpoints", "enabled"), ("checkpoints", "max_snapshots"),
         ("checkpoints", "max_total_size_mb"), ("checkpoints", "max_file_size_mb"))
 

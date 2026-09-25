@@ -124,6 +124,8 @@ class TurnRunner:
     def progress_callback(self, event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
         """Callback invoked by agent on tool lifecycle events."""
         ctx = self._ctx
+        if event_type in {"tool.started", "tool.completed"}:
+            ctx.timing.mark("tool_time")
         # Failed subagent → one clean user-facing notice, handled FIRST, before every progress-queue
         # gate: platforms with tool_progress off must still hear about a dead delegation.
         if event_type == "subagent.complete":
@@ -919,9 +921,16 @@ class TurnRunner:
         if scfg is None:
             from gateway.config import StreamingConfig
             scfg = StreamingConfig()
-        # display.platforms.<plat>.streaming may disable streaming per platform; None = follow global.
-        plat_streaming = ctx.resolve_display_setting(ctx.user_config, platform_key, "streaming")
-        want_stream_deltas = not ctx.scheduled_heartbeat and scfg.enabled_for(plat_streaming)
+        # Chat-type-aware streaming resolution (gateway/display_config.py): operator config →
+        # platform tier default → the Telegram root-DM default → the top-level master switch.
+        # Supersedes ``resolve_display_setting(..., "streaming")`` + ``StreamingConfig.enabled_for``,
+        # which could not see the session's chat type. A scheduled heartbeat is proactive work,
+        # not a reply to a user message, so it never streams deltas or posts interim messages.
+        from gateway.display_config import resolve_session_streaming
+        want_stream_deltas = not ctx.scheduled_heartbeat and resolve_session_streaming(
+            ctx.user_config, platform_key, getattr(ctx.source, "chat_type", None),
+            master_enabled=scfg.enabled and scfg.transport != "off", transport=scfg.transport,
+        )
         want_interim_messages = bool(ctx.interim_assistant_messages_enabled) and not ctx.scheduled_heartbeat
         if want_stream_deltas or want_interim_messages:
             try:
@@ -966,6 +975,8 @@ class TurnRunner:
         stream_delta_cb = None
         if delta_sinks:
             def stream_delta_cb(text: Optional[str]) -> None:
+                if text:
+                    ctx.timing.mark("api_first_chunk")
                 if ctx._run_still_current():
                     for sink in delta_sinks:
                         sink.on_delta(text)
@@ -1623,7 +1634,14 @@ class TurnRunner:
         )
         ctx = self._ctx
         persist_override: Optional[Any] = ctx.persist_user_message
+        # Classified before any note is prepended: every note below breaks the anchored
+        # trivial-prompt match, and a turn that carries one is not an ordinary social reply.
+        fast_path_reason_ = self._fast_path_reason(agent_history)
+        ctx_message_at_entry = ctx.message
+        rebind_branch: Optional[str] = None
         self._prepend_pending_note("_pending_model_notes")
+        if ctx.message is not ctx_message_at_entry:
+            rebind_branch = "pending_model_notes"
         # Auto-continue: history ending with a tool result means the previous turn was cut off
         # (restart, crash, SIGTERM). Session-level resume_pending (drain-timeout shutdown) uses
         # stronger reason-aware wording that subsumes this case. Both gate on the age of
@@ -1644,10 +1662,12 @@ class TurnRunner:
         )
         if resume_pending and (interruption_is_fresh or mark_is_fresh):
             # Empty message = the startup auto-resume turn; there is no NEW user message.
+            rebind_branch = "resume_pending"
             ctx.message, persist_override = _prepare_resume_pending_message(
                 resume_reason, ctx.message, interactive=self._resume_note_interactive(),
             )
         elif agent_history and agent_history[-1].get("role") == "tool" and interruption_is_fresh:
+            rebind_branch = "tool_last"
             persist_override = ctx.message
             ctx.message = (
                 "[System note: A new message has arrived. The conversation "
@@ -1656,13 +1676,104 @@ class TurnRunner:
                 "below FIRST. Do NOT re-execute old tool calls from the history.]\n\n"
                 + ctx.message
             )
+        before_skills = ctx.message
         self._prepend_pending_note("_pending_skills_reload_notes")
+        if ctx.message is not before_skills and rebind_branch is None:
+            rebind_branch = "pending_skills_reload_notes"
         # Safety net: a startup auto-resume event carries empty text; if the resume_pending branch
         # did not fire (freshness signals disagreed, marker cleared) we must NOT hand the model a blank
         # user turn. Restricted to resume_pending sessions so caption-less image turns are untouched.
         if isinstance(ctx.message, str) and not ctx.message.strip() and resume_pending:
+            rebind_branch = "resume_safety_net"
             ctx.message = build_resume_recovery_note(resume_reason, "", interactive=self._resume_note_interactive())
+        identity_ok = ctx.message is ctx_message_at_entry
+        # Compact ops line: reason / identity / which note claimed the message. Surfaces the
+        # LAB-52 live miss (reason=- while identity held) without logging every task turn.
+        if fast_path_reason_ is not None or rebind_branch is not None or (
+            isinstance(ctx_message_at_entry, str) and ctx_message_at_entry.lstrip().startswith("[")
+        ):
+            entry_len = len(ctx_message_at_entry) if isinstance(ctx_message_at_entry, str) else None
+            cur_len = len(ctx.message) if isinstance(ctx.message, str) else None
+            logger.info(
+                "[latency] fast_path_gate reason=%s identity=%s rebind=%s "
+                "entry_len=%s msg_len=%s entry_type=%s",
+                fast_path_reason_ or "-", identity_ok, rebind_branch or "-",
+                entry_len, cur_len, type(ctx_message_at_entry).__name__,
+            )
+        if fast_path_reason_ and identity_ok:
+            # Only when nothing else claimed the message: a recovery or resume note means the
+            # turn has state to reconcile, which is exactly when the loop should stay open.
+            from gateway.run_turn_fast_path import apply_fast_path_note
+            persist_override = persist_override if persist_override is not None else ctx.message
+            ctx.message = apply_fast_path_note(
+                ctx.message, fast_path_reason_, chat_id=getattr(ctx.source, "chat_id", None))
+            ctx.fast_path_taken = fast_path_reason_
         return persist_override, ctx.persist_user_timestamp
+
+    def _fast_path_reason(self, agent_history) -> Optional[str]:
+        """Why this turn needs no tool surface, or None. See gateway/run_turn_fast_path.py."""
+        from gateway.run import _platform_config_key
+        from gateway.run_turn_fast_path import fast_path_reason
+        ctx = self._ctx
+        source = ctx.source
+        try:
+            platform_key = _platform_config_key(getattr(source, "platform", None))
+        except Exception:
+            return None
+        return fast_path_reason(
+            ctx.message, platform_key=platform_key,
+            chat_type=getattr(source, "chat_type", None), history=agent_history,
+            user_config=ctx.user_config,
+            chat_id=getattr(source, "chat_id", None),
+        )
+
+    def _try_fast_lane_or_conversation(
+        self, agent, agent_history, observed_group_context, persist_msg, persist_ts,
+        stream_delta_cb, *, model, runtime_kwargs,
+    ):
+        """LAB-52: compact fast lane for no-task turns; fall back to the LAB-3 one-hop path.
+
+        The fast lane is a SEPARATE provider call (never mutates the session cache prefix).
+        Any failure or TTFT over budget returns control to ``_run_conversation_with_approval``
+        exactly as before.
+        """
+        ctx = self._ctx
+        if ctx.fast_path_taken:
+            from gateway.run_turn_fast_lane import is_fast_lane_enabled, try_fast_lane
+            if is_fast_lane_enabled(ctx.user_config):
+                user_text = persist_msg if isinstance(persist_msg, str) else ctx.message
+                # When the note was prepended, persist_msg holds the clean user text.
+                if not isinstance(user_text, str):
+                    user_text = str(user_text or "")
+                main_runtime = {
+                    "model": model,
+                    **{k: runtime_kwargs.get(k) for k in (
+                        "provider", "base_url", "api_key", "api_mode",
+                    ) if runtime_kwargs.get(k)},
+                }
+                # OpenCode Go rejects MissingSessionID without x-opencode-session.
+                # Reuse the turn's session identity (same key the main agent uses).
+                _affinity = (ctx.session_id or ctx.session_key or "").strip()
+                if _affinity:
+                    main_runtime["session_id"] = _affinity
+                lane = try_fast_lane(
+                    history=agent_history,
+                    user_message=user_text,
+                    user_config=ctx.user_config,
+                    main_runtime=main_runtime,
+                    on_delta=stream_delta_cb,
+                    chat_id=getattr(ctx.source, "chat_id", None),
+                )
+                if lane is not None:
+                    # Keep the warm cached agent coherent with the turn we just wrote
+                    # (FTS/#50502: a shorter live list would otherwise lose this ack).
+                    if agent is not None and isinstance(lane.get("messages"), list):
+                        with suppress(Exception):
+                            agent._session_messages = list(lane["messages"])
+                    return lane
+        return self._run_conversation_with_approval(
+            agent, agent_history, observed_group_context, persist_msg, persist_ts,
+        )
 
     def _native_image_run_message(self):
         """Wrap the user turn as an OpenAI-style multimodal content list when
@@ -1890,6 +2001,7 @@ class TurnRunner:
         """
         from gateway.run import _current_max_iterations, _normalize_empty_agent_response, _sanitize_gateway_final_response
         ctx = self._ctx
+        ctx.timing.mark("gateway_prep")
         runner = self._runner
         # Platform.LOCAL ("local") maps to the "cli" hint key the agent understands.
         # session_key is propagated via contextvars in _set_session_env() (_SESSION_KEY) and via
@@ -1946,10 +2058,21 @@ class TurnRunner:
         if pending_fallback_notice:
             # Reuse the in-agent one-shot notice so the pre-agent provider switch is user-visible too.
             agent._pending_fallback_notice = pending_fallback_notice
+        ctx.timing.mark("cached_agent_model_resolution")
         self._wire_turn_agent_callbacks(agent, turn_route, reasoning_config, stream_delta_cb, interim_cb, want_interim)
         agent_history, observed_group_context, history_media_paths = self._load_turn_history(agent, reused_cached_agent)
         persist_msg, persist_ts = self._prepare_turn_message(agent_history)
-        result = self._run_conversation_with_approval(agent, agent_history, observed_group_context, persist_msg, persist_ts)
+        ctx.timing.mark("context_memory_pre_llm")
+        ctx.timing.mark("api_start")
+        result = self._try_fast_lane_or_conversation(
+            agent, agent_history, observed_group_context, persist_msg, persist_ts, stream_delta_cb,
+            model=model, runtime_kwargs=runtime_kwargs,
+        )
+        ctx.timing.mark("api_end")
+        if ctx.fast_path_taken:
+            from gateway.run_turn_fast_path import log_fast_path_outcome
+            log_fast_path_outcome(
+                ctx.fast_path_taken, result, chat_id=getattr(ctx.source, "chat_id", None))
         self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
@@ -1990,10 +2113,12 @@ class TurnRunner:
                 final_response = f"⚠️ {result['error']}" if result.get("error") else ""
             # NOTE: deliberately omits agent_persisted/last_reasoning/response_* — the caller
             # defaults agent_persisted differently when the key is absent.
+            ctx.timing.log_terminal()
             return {"final_response": final_response, **common}
         final_response = self._append_auto_media_tags(final_response, result, agent_history, history_media_paths)
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
+        # Terminal log is deferred to finish_delivery() so final_delivery can be observed.
         return {
             "final_response": final_response, "last_reasoning": result.get("last_reasoning"), **common,
             "response_previewed": result.get("response_previewed", False),

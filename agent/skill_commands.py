@@ -654,6 +654,7 @@ def resolve_auto_load_skills(user_config: dict | None = None) -> list[str]:
 
 def build_auto_load_prompt(
     task_id: str | None = None, user_config: dict | None = None, home_override: Path | None = None,
+    task_text: str | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Render ``skills.auto_load`` as fully loaded skill blocks for a new session; returns
     ``(prompt_text, loaded_names, missing)``. Missing and operator-disabled names are reported,
@@ -662,11 +663,27 @@ def build_auto_load_prompt(
     *home_override* makes home resolution EXPLICIT (same seam as ``build_skills_system_prompt``): the config,
     the disabled list and the ``<home>/skills`` lookup all resolve under that home, so a gateway build thread
     that lost the HERMES_HOME ContextVar cannot pin the launch profile's skills into another profile's prompt.
+
+    *task_text* (first inbound message at session setup) optionally feeds ``agent.skill_routing``:
+    when enabled + keyed, a confidence-gated Jev Choice may replace the auto_load set. Failures
+    keep the default list; never blocks session start.
     """
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     home_token = set_hermes_home_override(str(home_override)) if home_override is not None else None
     try:
         auto_skills = resolve_auto_load_skills(user_config)
+        try:
+            from agent.skill_routing_jev import maybe_override_auto_load_skills
+            overridden = maybe_override_auto_load_skills(
+                task_text,
+                default_names=auto_skills,
+                user_config=user_config,
+                home_override=home_override,
+            )
+            if overridden is not None:
+                auto_skills = overridden
+        except Exception:
+            logger.debug("skill_routing override skipped", exc_info=True)
         if not auto_skills:
             return "", [], []
         loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(

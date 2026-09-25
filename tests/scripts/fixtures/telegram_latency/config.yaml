@@ -1,0 +1,6 @@
+platforms:
+  telegram:
+    extra:
+      conversational_dm_batching: true
+      text_batch_quiet_seconds: 2.0
+      text_batch_max_wait_seconds: 5.0

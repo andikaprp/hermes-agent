@@ -12,6 +12,16 @@ from gateway.run import (
     _sanitize_gateway_final_response,
 )
 
+
+def test_final_delivery_check_removes_ai_shaped_preambles_and_em_dashes():
+    text = "Got it — here's what I found: the cat is safe. Let me know if you need anything else."
+    sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, text)
+    assert "—" not in sanitized
+    assert "got it" not in sanitized.lower()
+    assert "here's what i found" not in sanitized.lower()
+    assert "let me know if you need anything else" not in sanitized.lower()
+    assert "the cat is safe" in sanitized.lower()
+
 # Every human-facing chat surface that must receive noise-filtered,
 # secret-redacted, provider-error-sanitized output (not just Telegram).
 # The filtering functions under test (_prepare_gateway_status_message /

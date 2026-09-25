@@ -728,6 +728,53 @@ The CLI shows caching status at startup:
 ```
 
 
+## Semantic pins and the visibility ladder (default off)
+
+`compression.semantic_pins` and `compression.visibility_ladder` are
+**init-consumed**. They are parsed in `_parse_compression_config` and stored
+on `ContextCompressor` at construction. They are not listed in
+`GatewayRunner._CACHE_BUSTING_CONFIG_KEYS` and they are not applied by
+`tui_gateway/session_compression.py`. A flip takes effect when the agent is
+reconstructed (new CLI session, or a gateway process restart / cache miss),
+not on the next turn of a live cached agent. This is the same boundary as
+`compression.jev_scorer`.
+
+This does **not** resolve the existing conflict for `compression.threshold`.
+The hermes-configuration notes say that key is consumed at agent init, while
+`gateway/run.py` lists it in the cache-busting table and
+`tests/tui_gateway/test_compression_config_hot_reload.py` tests TUI hot reload
+of the live compressor. The new keys are classified one way (init-consumed)
+and are not added to either hot-reload surface.
+
+`compression.cache_reuse_decision` is also init-consumed and is hard-forced to
+`false`. LAB-52 says never mutate the cached prefix. AGENTS.md says prompt
+caching is sacred. Measured steady-state prompt-cache hit rate is about 99
+percent. A decision that rewrote the cached prefix to reuse a prior compaction
+would invalidate that prefix, so the flag is a documented non-adoption.
+
+Both features default to `enabled: false`. Nothing on the main compaction path
+changes until a human flips a flag and reconstructs the agent. Visibility
+scoring runs only on the slow compaction path (`slow_path_only`, or
+`async_precompute` joined from that path). It does not add a decision-model
+call to `gateway/run_turn_fast_lane.py`.
+
+```yaml
+compression:
+  semantic_pins:
+    enabled: false
+    classes: [active_task, goal_scaffold, standing_instruction]
+  visibility_ladder:
+    enabled: false
+    scoring: slow_path_only   # or async_precompute
+  cache_reuse_decision: false
+```
+
+Pinned spans are redacted with the same strict helper as every other compaction
+boundary before they are spliced back, so a pin cannot reintroduce a secret
+the summarizer would have stripped. Hidden visibility means the item is not
+sent; the original stays in the in-process ledger and can move to a higher
+level on a later question.
+
 ## Context Pressure Warnings
 
 Intermediate context-pressure warnings have been removed (see the iteration-budget block in `agent/turn_iteration_prep.py`, which notes: "No intermediate pressure warnings — they caused models to 'give up' prematurely on complex tasks"). Compression fires when prompt tokens reach the configured `compression.threshold` (default 50%) with no prior warning step; gateway session hygiene fires as the secondary safety net at 85% of the model's context window.

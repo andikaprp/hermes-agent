@@ -721,6 +721,7 @@ def _handle_vault_fill(args: Dict[str, Any], **kwargs) -> str:
 
 
 from tools.registry import no_cache_check_fn, registry  # noqa: E402
+from gateway.jev_action_gate import schema_override_fn  # noqa: E402
 
 _check_vault_available = no_cache_check_fn(_check_vault_available)
 
@@ -748,6 +749,7 @@ registry.register(
     schema=BROWSER_VAULT_SAVE_LOGIN_SCHEMA,
     handler=_handle_vault_save_login,
     check_fn=_check_vault_available,
+    dynamic_schema_overrides=schema_override_fn("browser", BROWSER_VAULT_SAVE_LOGIN_SCHEMA),
     emoji="🔐",
 )
 
@@ -757,6 +759,7 @@ registry.register(
     schema=BROWSER_VAULT_ENTER_CODE_SCHEMA,
     handler=_handle_vault_enter_code,
     check_fn=_check_vault_available,
+    dynamic_schema_overrides=schema_override_fn("browser", BROWSER_VAULT_ENTER_CODE_SCHEMA),
     emoji="🔐",
 )
 
@@ -766,5 +769,6 @@ registry.register(
     schema=BROWSER_VAULT_FILL_SCHEMA,
     handler=_handle_vault_fill,
     check_fn=_check_vault_available,
+    dynamic_schema_overrides=schema_override_fn("browser", BROWSER_VAULT_FILL_SCHEMA),
     emoji="🔐",
 )

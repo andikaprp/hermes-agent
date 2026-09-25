@@ -1062,6 +1062,20 @@ gateway:
 
 **What if a draft frame fails?** Any failure (transient network error, server-side rejection, older python-telegram-bot install) flips that response back to the edit-based path for the rest of the stream. The next response gets a fresh attempt.
 
+### No-task fast path (`gateway.telegram.fast_path`)
+
+Bare acknowledgements and greetings in a Telegram DM (`hi`, `thanks`, `ya`, `oke`) take a one-hop path: the model is asked, via a note on the user message, to answer directly and call no tools. The tool schema stays on the wire — a misroute degrades to "the model ignored a hint", never to dropped work. Default **on**.
+
+Disable without a code change:
+
+```yaml
+gateway:
+  telegram:
+    fast_path: false
+```
+
+A missing key is still enabled: the gateway reads `config.yaml` with no default-config merge, so absence is not an opt-out. Groups, quoted replies, media, slash commands, URLs, bracketed system notices, messages that carry an object or an action verb, and questions that need the world or some named state stay on the full loop. `done` is excluded deliberately — it usually reports a finished step and expects the next one. `gateway.telegram.fast_path` is the on/off gate; the classifier does not grow its acknowledgement list to chase recall.
+
 ## Rendering: Rich Messages, Tables and Link Previews
 
 **Rich Messages (Bot API 10.1).** Final replies that contain constructs the legacy MarkdownV2 path degrades — tables, task lists, collapsible `<details>`, and block math — are sent with Telegram's native [`sendRichMessage`](https://core.telegram.org/bots/api#sendrichmessage) using the agent's **raw markdown**, so they render natively with no client-side flattening. In DMs, the default `rich_drafts: false` keeps the streaming preview plain — it uses Telegram's ephemeral draft transport with legacy rendering (tables and other rich-only constructs stay as raw markdown in the preview) — then persists the completed response with `sendRichMessage`. Setting `rich_drafts: true` makes the live preview use `sendRichMessageDraft` too. Edit-based streams can finalize an existing preview in place through `editMessageText`'s `rich_message` parameter. Ordinary replies (plain prose, bold/italic, simple lists) stay on the MarkdownV2 path for consistent font weight and spacing across clients.
@@ -1328,6 +1342,30 @@ Or via environment variable:
 ```bash
 TELEGRAM_REACTIONS=true
 ```
+
+### Reaction Style
+
+`reaction_style` decides which reactions the bot posts when they are enabled:
+
+| Style | Behaviour |
+|-------|-----------|
+| `receipt` (default) | Automated lifecycle receipts — 👀 while processing, then 👍 / 👎 (cleared if the turn is cancelled) |
+| `content` | No automatic reactions at all; the agent reacts only where it deliberately decides to, via the `react_to_message` tool (pass `message_id`) |
+| `off` | Same as leaving reactions disabled |
+
+```yaml
+telegram:
+  reactions: true
+  reaction_style: content
+```
+
+Set it next to `reactions` (the per-install extras map works too, e.g. `platforms.telegram.extra.reaction_style`), or through the environment variable, which wins over `config.yaml`:
+
+```bash
+TELEGRAM_REACTION_STYLE=content
+```
+
+`reactions: false` remains the master switch — no style value produces automatic reactions while it is off. A style the bot does not recognize is logged once and falls back to `receipt`, so a typo never breaks message processing.
 
 :::note
 Unlike Discord (where reactions are additive), Telegram's Bot API replaces all bot reactions in a single call. The transition from 👀 to 👍/👎 happens atomically — you won't see both at once.

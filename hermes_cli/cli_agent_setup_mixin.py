@@ -703,10 +703,21 @@ class CLIAgentSetupMixin:
             _cli._active_agent_ref = self.agent
             # Seed the agent's once-per-lifecycle auto_load cache with the bytes the preload
             # thread rendered, so the shared prompt path never re-reads config or skill files.
+            # When agent.skill_routing is enabled, defer commit until the first prompt build has
+            # the inbound task (Jev choice at session setup only).
             _auto_result = getattr(self, "_auto_load_skills_result", None)
             if _auto_result is not None:
-                self.agent._auto_load_skills_result = _auto_result
-                self.agent._auto_load_skills_resolved = True
+                _defer_skill_route = False
+                try:
+                    from agent.skill_routing_jev import skill_routing_enabled
+                    _defer_skill_route = skill_routing_enabled()
+                except Exception:
+                    _defer_skill_route = False
+                if _defer_skill_route:
+                    pass  # leave _auto_load_skills_resolved False for first-turn routing
+                else:
+                    self.agent._auto_load_skills_result = _auto_result
+                    self.agent._auto_load_skills_resolved = True
             # Route agent status output through prompt_toolkit so ANSI escapes aren't garbled by
             # patch_stdout's StdoutProxy (#2262), holding lines while a response box streams so a
             # subagent/background completion notice never splits the reply mid-paragraph.

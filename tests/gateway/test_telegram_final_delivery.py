@@ -11,6 +11,19 @@ from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
 from plugins.platforms.telegram.adapter import TelegramAdapter
 
 
+def test_scheduled_telegram_output_contains_only_reminder_body():
+    wrapped = (
+        'Cronjob Response: morning-reminder\n'
+        '(job_id: job-123)\n'
+        '-------------\n\n'
+        'Take your medication.\n\n'
+        'To stop or manage this job, send me a new message '
+        '(e.g. "stop reminder morning-reminder").'
+    )
+
+    assert TelegramAdapter.strip_cron_wrapper(wrapped) == "Take your medication."
+
+
 def _adapter() -> MagicMock:
     adapter = MagicMock()
     adapter.REQUIRES_EDIT_FINALIZE = True
