@@ -4316,8 +4316,15 @@ class BasePlatformAdapter(ABC):
         if obligation_id is not None:
             await self._release_turn_marker(event)  # the ledger now owns the crash recovery
         outcome.attempted()
-        result = await delivery_adapter._send_with_retry(
-            chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        try:
+            result = await delivery_adapter._send_with_retry(
+                chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        except Exception:
+            # Raised transport/provider failures never produce a SendResult — still record failed
+            # so the outcome carrier does not stall at attempted with no terminal status.
+            with contextlib.suppress(Exception):
+                outcome.failed()
+            raise
         with contextlib.suppress(Exception):
             outcome.apply_send_result(result)
         if obligation_id is not None:

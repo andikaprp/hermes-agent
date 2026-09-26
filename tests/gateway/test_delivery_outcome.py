@@ -308,6 +308,63 @@ async def test_send_final_ledgered_emits_outcome_for_slack(caplog, monkeypatch):
     )
 
 
+@pytest.mark.asyncio
+async def test_send_final_ledgered_records_failed_when_send_raises(caplog, monkeypatch):
+    """Raised _send_with_retry must emit status=failed and re-raise unchanged."""
+    caplog.set_level(logging.INFO, logger=OUTCOME_LOGGER)
+    from gateway.platforms.base import BasePlatformAdapter
+
+    class _Boom(RuntimeError):
+        pass
+
+    class _Adapter(BasePlatformAdapter):
+        @property
+        def name(self):
+            return "telegram"
+
+        async def connect(self, *, is_reconnect=False):
+            return True
+
+        async def disconnect(self):
+            return None
+
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            raise AssertionError("send must not be reached; _send_with_retry is stubbed")
+
+        async def get_chat_info(self, chat_id):
+            return {"id": chat_id}
+
+    adapter = _Adapter(PlatformConfig(enabled=True), Platform.TELEGRAM)
+    adapter._connected = True
+    monkeypatch.setattr(
+        adapter, "_record_delivery_obligation", AsyncMock(return_value=None))
+    monkeypatch.setattr(adapter, "_final_delivery_adapter", lambda source: adapter)
+
+    boom = _Boom("network/provider failure")
+
+    async def _raise_send(**kwargs):
+        raise boom
+
+    monkeypatch.setattr(adapter, "_send_with_retry", _raise_send)
+
+    event = SimpleNamespace(
+        source=SimpleNamespace(platform=Platform.TELEGRAM, chat_id=CHAT_ID, thread_id=None),
+        text="hi", message_id="m1", ledger_message_id=None)
+    with pytest.raises(_Boom) as raised:
+        await adapter.send_final_ledgered(
+            event, "agent:main:telegram:dm:x", "hello", {}, reply_to=None)
+    assert raised.value is boom
+
+    payloads = [r.delivery_outcome for r in _outcomes(caplog)]
+    assert any(
+        p["stage"] == STAGE_ATTEMPTED
+        and p["status"] == STATUS_FAILED
+        and p["channel"] == CHANNEL_TELEGRAM
+        for p in payloads
+    )
+    _assert_no_leak(_outcomes(caplog))
+
+
 # --- web chat SSE evidence -----------------------------------------------
 
 
