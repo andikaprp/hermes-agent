@@ -4294,17 +4294,39 @@ class BasePlatformAdapter(ABC):
         transport) leaves a ledger row the boot sweep / runtime redelivery can act on. ``event``
         supplies the source and the ledger identity (``ledger_message_id`` or ``message_id``).
         Returns the result with the adapter that sent it: that adapter owns ``result.message_id``
-        (an ephemeral delete must go to the same transport)."""
+        (an ephemeral delete must go to the same transport).
+
+        Also emits a privacy-safe :class:`~gateway.delivery_outcome.DeliveryOutcome` for the
+        shared gateway stage model (prepared → attempted → delivered|failed). Never marks
+        ``confirmed`` — platform acceptance is not client acknowledgement.
+        """
+        from gateway.delivery_outcome import DeliveryOutcome
+
         delivery_adapter = self._final_delivery_adapter(event.source)
         text_content = final_delivery_voice_check(text_content)
         logger.info("[%s] Sending response (%d chars) to %s", delivery_adapter.name,
                     len(text_content), event.source.chat_id)
+        source = event.source
+        outcome = DeliveryOutcome(
+            channel=getattr(source, "platform", delivery_adapter.platform),
+            chat_id=getattr(source, "chat_id", None))
+        outcome.prepared()
         obligation_id = await self._record_delivery_obligation(
             event, session_key, text_content, delivery_adapter, is_ephemeral_response)
         if obligation_id is not None:
             await self._release_turn_marker(event)  # the ledger now owns the crash recovery
-        result = await delivery_adapter._send_with_retry(
-            chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        outcome.attempted()
+        try:
+            result = await delivery_adapter._send_with_retry(
+                chat_id=event.source.chat_id, content=text_content, reply_to=reply_to, metadata=metadata)
+        except Exception:
+            # Raised transport/provider failures never produce a SendResult — still record failed
+            # so the outcome carrier does not stall at attempted with no terminal status.
+            # Catch Exception only (not BaseException); re-raise the original unchanged.
+            outcome.record_attempt_failed()
+            raise
+        with contextlib.suppress(Exception):
+            outcome.apply_send_result(result)
         if obligation_id is not None:
             await self._finalize_delivery_obligation(obligation_id, result, event, delivery_adapter)
         return result, delivery_adapter

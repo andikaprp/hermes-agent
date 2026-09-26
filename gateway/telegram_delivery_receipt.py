@@ -16,54 +16,45 @@ only the enumerated fields below:
 
 There is no field for message text, user content, tokens, or error strings, and no
 generic ``**kwargs`` sink: a receipt can only be built from the keywords above, so a
-later edit cannot accidentally append a payload. The digest is keyed with a per-process
-random salt, so the same chat renders the same token for the lifetime of one gateway
-process and a different token after a restart (deliberate trade: correlatable inside a
-process, not enumerable across logs — an unsalted digest of a numeric Telegram id is
+later edit cannot accidentally append a payload. Digests share the per-process salt
+with :mod:`gateway.delivery_outcome` so Telegram receipts and gateway-wide outcomes
+correlate inside one process (deliberate trade: correlatable inside a process, not
+enumerable across logs — an unsalted digest of a numeric Telegram id is
 brute-forceable in seconds). Emitting never raises: a logging failure must not break a
 live send.
 
 Scope: the seams that deliver a *new* message — the legacy ``sendMessage`` chunk path
 and the Bot API 10.1 ``sendRichMessage`` path. Edits, ephemeral draft frames, and
 control-style sends (prompts/pickers) deliver no new message and emit nothing.
+
+Telegram ``outcome=success`` means provider acceptance (a ``message_id``) — gateway
+stage ``delivered``, never ``confirmed`` (bots have no user-read acknowledgement here).
+See :class:`gateway.delivery_outcome.DeliveryOutcome` for the shared stage model.
 """
 
 from __future__ import annotations
 
 import contextlib
-import hashlib
-import hmac
 import logging
-import os
 import time
 from typing import Any, Callable, Optional
+
+# Digests live on the shared gateway outcome module so every channel shares one salt.
+from gateway.delivery_outcome import (  # noqa: F401 — re-export for existing importers
+    CHAT_DIGEST_PREFIX,
+    DIGEST_CHARS,
+    MESSAGE_DIGEST_PREFIX,
+    MISSING_TOKEN,
+    redacted_token,
+)
 
 logger = logging.getLogger("gateway.telegram_delivery_receipt")
 
 RECEIPT_LOG_PREFIX = "telegram_delivery_receipt"
-CHAT_DIGEST_PREFIX = "c"
-MESSAGE_DIGEST_PREFIX = "m"
-DIGEST_CHARS = 12
-MISSING_TOKEN = "none"
 PRESENT = "present"
 ABSENT = "absent"
 SUCCESS = "success"
 FAILURE = "failure"
-
-# Per-process correlation salt. Random by design: a raw sha256 of a small numeric id
-# is reversible by enumeration, which would make "hashed" ids raw in practice.
-_PROCESS_SALT = os.urandom(32)
-
-
-def redacted_token(value: Any, *, prefix: str) -> str:
-    """Short keyed digest of *value* (``none`` when absent/blank); never the raw value."""
-    if value is None:
-        return MISSING_TOKEN
-    text = str(value).strip()
-    if not text:
-        return MISSING_TOKEN
-    digest = hmac.new(_PROCESS_SALT, text.encode("utf-8"), hashlib.sha256).hexdigest()[:DIGEST_CHARS]
-    return f"{prefix}{digest}"
 
 
 def _presence(value: Any) -> str:

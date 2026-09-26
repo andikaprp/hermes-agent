@@ -3525,6 +3525,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "X-Accel-Buffering": "no", **self._session_headers(session_id, gateway_session_key)}
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
+        # Web chat: enqueue/SSE write is at most ``attempted``. Without a concrete
+        # browser/client acknowledgement we leave delivered/confirmed unavailable.
+        from gateway.delivery_outcome import (
+            CHANNEL_WEB_CHAT, DeliveryOutcome, EVIDENCE_SSE_ENQUEUE, EVIDENCE_SSE_WRITE,
+            STAGE_CONFIRMED, STAGE_DELIVERED)
+        web_outcome = DeliveryOutcome(channel=CHANNEL_WEB_CHAT, chat_id=session_id)
+        web_outcome.prepared(evidence=EVIDENCE_SSE_ENQUEUE)
+        terminal_written = False
         try:
             while True:
                 try:
@@ -3535,17 +3543,30 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 if item is None:
                     break
                 name, payload = item
+                web_outcome.attempted(evidence=EVIDENCE_SSE_WRITE)
                 await response.write(_sse_frame(payload, event=name, ensure_ascii=False))
+                if name in {"assistant.completed", "done"} or str(name).startswith("run."):
+                    terminal_written = True
+            if terminal_written:
+                # Bytes left the server — still not browser render / client receipt.
+                web_outcome.unavailable(for_stage=STAGE_DELIVERED, evidence=EVIDENCE_SSE_WRITE)
+                web_outcome.unavailable(for_stage=STAGE_CONFIRMED, evidence=EVIDENCE_SSE_WRITE)
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            with suppress(Exception):
+                web_outcome.failed()
             await self._drain_session_stream_task_on_disconnect(
                 run_id, task, interrupt_message="SSE client disconnected", shield_wait=False)
             logger.info("Session SSE client disconnected; interrupted live run %s", run_id)
         except asyncio.CancelledError:
+            with suppress(Exception):
+                web_outcome.failed()
             await self._drain_session_stream_task_on_disconnect(
                 run_id, task, interrupt_message="SSE task cancelled", shield_wait=True)
             logger.info("Session SSE task cancelled; drained live run %s", run_id)
             raise
         except Exception as exc:
+            with suppress(Exception):
+                web_outcome.failed()
             logger.debug("[api_server] session SSE stream error: %s", exc)
         return response
 

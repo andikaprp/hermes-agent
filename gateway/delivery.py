@@ -1,6 +1,7 @@
 """Delivery routing for cron job outputs and agent responses, by target: explicit ("telegram:123456789"),
 platform home channel ("telegram"), origin (back to where the job was created), or local (files)."""
 
+import contextlib
 import logging
 import re
 from pathlib import Path
@@ -165,11 +166,18 @@ class DeliveryRouter:
     async def deliver(self, content: str, targets: List[DeliveryTarget], job_id: Optional[str] = None,
                       job_name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Deliver content to all targets; returns per-target results keyed by target string."""
+        from gateway.delivery_outcome import (
+            DeliveryOutcome, EVIDENCE_DEAD_TARGET, EVIDENCE_NO_TRANSPORT)
+
         results = {}
         for target in targets:
+            outcome = DeliveryOutcome(channel=target.platform, chat_id=target.chat_id)
             if target.unknown_platform is not None:
+                outcome.prepared()
+                outcome.failed(evidence=EVIDENCE_NO_TRANSPORT)
                 results[target.to_string()] = {
-                    "success": False, "error": f"unknown_platform: {target.unknown_platform}"}
+                    "success": False, "error": f"unknown_platform: {target.unknown_platform}",
+                    "delivery_outcome": outcome.fields()}
                 continue
             # Skip targets proven permanently unreachable (deleted group, blocked bot, deactivated user) —
             # re-sending each tick wastes flood-control budget. Self-healing: a later successful send
@@ -178,29 +186,57 @@ class DeliveryRouter:
             if tracked and self.dead_targets.is_dead(target.platform.value, target.chat_id):
                 logger.info("Skipping delivery to known-dead target %s:%s (send to it again to clear)",
                             target.platform.value, target.chat_id)
+                outcome.prepared()
+                outcome.filtered(evidence=EVIDENCE_DEAD_TARGET)
                 results[target.to_string()] = {"success": False, "skipped": "dead_target",
-                                               "error": "target previously confirmed unreachable"}
+                                               "error": "target previously confirmed unreachable",
+                                               "delivery_outcome": outcome.fields()}
                 continue
             try:
                 if target.platform == Platform.LOCAL:
-                    result = self._deliver_local(content, job_id, job_name, metadata)
+                    result = self._deliver_local(content, job_id, job_name, metadata, outcome=outcome)
+                    results[target.to_string()] = {
+                        "success": True, "result": result, "delivered": False,
+                        "delivery_outcome": outcome.fields()}
                 else:
-                    result = await self._deliver_to_platform(target, content, metadata)
+                    result = await self._deliver_to_platform(
+                        target, content, metadata, outcome=outcome)
+                    if isinstance(result, dict) and result.get("filtered"):
+                        # Keep deliver()-level success for cron bookkeeping, but the
+                        # outcome carrier records filtered (not delivered).
+                        results[target.to_string()] = {
+                            "success": True, "result": result, "delivered": False,
+                            "filtered": result.get("filtered"),
+                            "delivery_outcome": outcome.fields()}
+                        continue
                     if target.chat_id and _send_result_error(result) is None:
                         self.dead_targets.clear(target.platform.value, target.chat_id)
-                results[target.to_string()] = {"success": True, "result": result}
+                    results[target.to_string()] = {
+                        "success": True, "result": result,
+                        "delivery_outcome": outcome.fields()}
             except Exception as e:
                 # Hard failures raise. Record a whole-chat death so future deliveries short-circuit.
                 dead_kind = classify_dead_error(str(e)) if tracked else None
                 if dead_kind:
                     self.dead_targets.mark_dead(target.platform.value, target.chat_id,
                                                 reason=f"{dead_kind}: {str(e)[:120]}")
-                results[target.to_string()] = {"success": False, "error": str(e)}
+                with contextlib.suppress(Exception):
+                    if outcome.stage is None:
+                        outcome.prepared()
+                    if outcome.stage == "prepared":
+                        outcome.attempted()
+                    outcome.failed()
+                results[target.to_string()] = {
+                    "success": False, "error": str(e),
+                    "delivery_outcome": outcome.fields()}
         return results
 
     def _deliver_local(self, content: str, job_id: Optional[str], job_name: Optional[str],
-                       metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Save content to local files."""
+                       metadata: Optional[Dict[str, Any]],
+                       outcome: Optional[Any] = None) -> Dict[str, Any]:
+        """Save content to local files. Local saves are never ``delivered``."""
+        if outcome is not None:
+            outcome.prepared()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = self.output_dir / (job_id or "misc") / f"{timestamp}.md"
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,7 +245,9 @@ class DeliveryRouter:
         lines += [f"**Job ID:** {job_id}"] if job_id else []
         lines += [f"**{key}:** {value}" for key, value in (metadata or {}).items()] + ["", "---", "", content]
         output_path.write_text("\n".join(lines), encoding="utf-8")
-        return {"path": str(output_path), "timestamp": timestamp}
+        if outcome is not None:
+            outcome.local_saved()
+        return {"path": str(output_path), "timestamp": timestamp, "delivered": False}
 
     def _save_full_output(self, content: str, job_id: str) -> Path:
         """Save full cron output to disk and return the file path."""
@@ -251,6 +289,7 @@ class DeliveryRouter:
     async def _deliver_to_platform(self, target: DeliveryTarget, content: str,
                                    metadata: Optional[Dict[str, Any]],
                                    transport: Optional[DeliveryTransport] = None,
+                                   outcome: Optional[Any] = None,
                                    ) -> Dict[str, Any]:
         """Deliver content to a messaging platform.
 
@@ -260,11 +299,19 @@ class DeliveryRouter:
         adapters dict cannot re-derive that grant under satellite config
         (#115656). Omitted (None) preserves resolution for every other caller.
         """
+        from gateway.delivery_outcome import EVIDENCE_FILTERED, EVIDENCE_NO_TRANSPORT
+
+        if outcome is not None:
+            outcome.prepared()
         if transport is None:
             transport = resolve_delivery_transport(target.platform, self.config, self.adapters)
         if transport is None:
+            if outcome is not None:
+                outcome.failed(evidence=EVIDENCE_NO_TRANSPORT)
             raise ValueError(f"No adapter configured for {target.platform.value}")
         if not target.chat_id:
+            if outcome is not None:
+                outcome.failed(evidence=EVIDENCE_NO_TRANSPORT)
             raise ValueError(f"No chat ID for {target.platform.value} delivery")
         adapter = transport.adapter
         content = self._cap_oversized_output(adapter, content, (metadata or {}).get("job_id", "unknown"))
@@ -281,6 +328,8 @@ class DeliveryRouter:
         if self._filter_silence_narration_enabled() and not is_cron_artifact and _is_silence_narration(content):
             logger.warning("Dropped silence-narration outbound to %s (chat=%s): %r",
                            target.platform.value, target.chat_id, content[:40])
+            if outcome is not None:
+                outcome.filtered(evidence=EVIDENCE_FILTERED)
             return {"success": True, "filtered": "silence_narration", "delivered": False}
 
         send_metadata = dict(metadata or {})
@@ -310,6 +359,8 @@ class DeliveryRouter:
                     send_metadata["telegram_dm_topic_reply_fallback"] = True
 
         for retry in (False, True):
+            if outcome is not None:
+                outcome.attempted()
             result = await transport.send(target.platform, target.chat_id, content, metadata=send_metadata or None)
             error = _send_result_error(result)
             if retry or error is None or not named_topic or "thread not found" not in error.lower():
@@ -318,5 +369,9 @@ class DeliveryRouter:
             send_metadata["thread_id"] = await _ensure_named_dm_topic(adapter, target.chat_id, named_topic, refresh=True)
             send_metadata["telegram_dm_topic_created_for_send"] = True
         if error is not None:
+            if outcome is not None:
+                outcome.failed()
             raise RuntimeError(error or f"{target.platform.value} delivery failed")
+        if outcome is not None:
+            outcome.apply_send_result(result)
         return result
