@@ -320,7 +320,7 @@ async def test_send_final_ledgered_records_failed_when_send_raises(caplog, monke
     class _Adapter(BasePlatformAdapter):
         @property
         def name(self):
-            return "telegram"
+            return "slack"
 
         async def connect(self, *, is_reconnect=False):
             return True
@@ -334,7 +334,8 @@ async def test_send_final_ledgered_records_failed_when_send_raises(caplog, monke
         async def get_chat_info(self, chat_id):
             return {"id": chat_id}
 
-    adapter = _Adapter(PlatformConfig(enabled=True), Platform.TELEGRAM)
+    # Channel-agnostic seam: Slack stands in for any platform adapter.
+    adapter = _Adapter(PlatformConfig(enabled=True), Platform.SLACK)
     adapter._connected = True
     monkeypatch.setattr(
         adapter, "_record_delivery_obligation", AsyncMock(return_value=None))
@@ -348,21 +349,34 @@ async def test_send_final_ledgered_records_failed_when_send_raises(caplog, monke
     monkeypatch.setattr(adapter, "_send_with_retry", _raise_send)
 
     event = SimpleNamespace(
-        source=SimpleNamespace(platform=Platform.TELEGRAM, chat_id=CHAT_ID, thread_id=None),
+        source=SimpleNamespace(platform=Platform.SLACK, chat_id="C9", thread_id=None),
         text="hi", message_id="m1", ledger_message_id=None)
     with pytest.raises(_Boom) as raised:
         await adapter.send_final_ledgered(
-            event, "agent:main:telegram:dm:x", "hello", {}, reply_to=None)
+            event, "agent:main:slack:channel:C9", "hello", {}, reply_to=None)
     assert raised.value is boom
 
     payloads = [r.delivery_outcome for r in _outcomes(caplog)]
     assert any(
         p["stage"] == STAGE_ATTEMPTED
         and p["status"] == STATUS_FAILED
-        and p["channel"] == CHANNEL_TELEGRAM
+        and p["channel"] == CHANNEL_SLACK
         for p in payloads
     )
     _assert_no_leak(_outcomes(caplog))
+
+
+def test_record_attempt_failed_never_raises():
+    """Safe failure recording must not surface bookkeeping errors to the send path."""
+    outcome = DeliveryOutcome(channel="discord", chat_id="ch1")
+    outcome.prepared()
+    outcome.attempted()
+    # Even if emit/logger is broken, record_attempt_failed stays quiet.
+    broken = logging.getLogger("gateway.delivery_outcome.broken")
+    outcome._logger = broken
+    outcome._logger.info = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("log boom"))
+    outcome.record_attempt_failed()
+    assert outcome.status == STATUS_FAILED
 
 
 # --- web chat SSE evidence -----------------------------------------------

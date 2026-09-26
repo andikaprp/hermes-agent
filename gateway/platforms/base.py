@@ -4322,8 +4322,8 @@ class BasePlatformAdapter(ABC):
         except Exception:
             # Raised transport/provider failures never produce a SendResult — still record failed
             # so the outcome carrier does not stall at attempted with no terminal status.
-            with contextlib.suppress(Exception):
-                outcome.failed()
+            # Catch Exception only (not BaseException); re-raise the original unchanged.
+            outcome.record_attempt_failed()
             raise
         with contextlib.suppress(Exception):
             outcome.apply_send_result(result)

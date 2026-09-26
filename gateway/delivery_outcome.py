@@ -204,6 +204,12 @@ class DeliveryOutcome:
         self._evidence = evidence or EVIDENCE_FAILURE
         self._emit(key=f"failed:{self._stage or 'none'}")
 
+    def record_attempt_failed(self, *, evidence: str = EVIDENCE_FAILURE) -> None:
+        """Mark a raised outbound attempt as failed. Never raises — bookkeeping must not
+        mask or replace the original send exception."""
+        with contextlib.suppress(Exception):
+            self.failed(evidence=evidence)
+
     def filtered(self, *, evidence: str = EVIDENCE_FILTERED) -> None:
         """Suppressed / filtered — not a successful delivery."""
         self._status = STATUS_FILTERED
