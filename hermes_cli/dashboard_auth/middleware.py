@@ -40,6 +40,8 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/auth/login", "/auth/callback", "/auth/native/authorize", "/auth/native/token",
     "/auth/native/refresh", "/auth/password-login", "/auth/logout", "/login",
     "/api/auth/providers", "/api/mcp/oauth/callback/",
+    # Telegram Mini App enrollment form (HTML). Auth is initData+challenge on POST.
+    "/vault/enroll",
     "/assets/", "/favicon.ico", "/ds-assets/", "/fonts/", "/fonts-terminal/")
 
 
