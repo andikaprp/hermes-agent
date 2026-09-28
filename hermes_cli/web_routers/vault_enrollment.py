@@ -192,11 +192,14 @@ def _section_int(key: str, default: int) -> int:
 
 
 def _tls_ok(request: Request) -> bool:
-    """Require HTTPS (direct or via X-Forwarded-Proto)."""
-    if request.url.scheme == "https":
-        return True
-    xf = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
-    return xf == "https"
+    """Require HTTPS via the trusted ASGI scheme only.
+
+    Uvicorn ``ProxyHeadersMiddleware`` rewrites ``request.url.scheme`` from
+    ``X-Forwarded-Proto`` only when the peer is in ``dashboard.trusted_proxies``
+    (plus loopback defaults). Never read the raw header here — a client on an
+    untrusted hop could otherwise spoof HTTPS over plain HTTP.
+    """
+    return request.url.scheme == "https"
 
 
 def _guard_request(request: Request, prereqs) -> Optional[JSONResponse]:

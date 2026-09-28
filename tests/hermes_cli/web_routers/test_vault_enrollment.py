@@ -176,3 +176,111 @@ def test_mini_app_html_has_no_send_data(app_env):
     assert resp.status_code == 200
     assert "sendData" not in resp.text
     assert "Telegram.WebApp.sendData" not in resp.text
+
+
+def test_raw_forwarded_proto_cannot_bypass_http_guard(tmp_path, monkeypatch):
+    """Client-supplied X-Forwarded-Proto must not turn plain HTTP into TLS-ok."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", _FAKE_BOT_TOKEN)
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", _OWNER)
+    monkeypatch.setattr(
+        "agent.vault_telegram_enrollment._cfg_section",
+        lambda: {"enabled": True, "public_origin": _PUBLIC},
+    )
+    # Do NOT monkeypatch _tls_ok — exercise the real ASGI-scheme check.
+    app = FastAPI()
+    app.include_router(ve.router)
+    client = TestClient(app)
+    resp = client.post(
+        "/api/vault/enroll/begin",
+        headers={
+            **_headers(),
+            "X-Forwarded-Proto": "https",
+            "X-Telegram-Init-Data": _init(),
+        },
+        json={},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "HTTPS required"
+
+
+def test_tls_ok_follows_trusted_proxy_scheme_only():
+    """ProxyHeadersMiddleware may promote scheme only for trusted peers."""
+    import asyncio
+
+    from starlette.requests import Request
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+    from hermes_cli.web_server_lifecycle import _dashboard_forwarded_allow_ips
+
+    trusted = _dashboard_forwarded_allow_ips({"trusted_proxies": ["172.18.0.0/16"]})
+
+    async def observed_tls(peer: str) -> bool:
+        seen: dict[str, bool] = {}
+
+        async def downstream(scope, receive, send):
+            seen["ok"] = ve._tls_ok(Request(scope))
+
+        middleware = ProxyHeadersMiddleware(downstream, trusted_hosts=trusted)
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/vault/enroll/begin",
+            "raw_path": b"/api/vault/enroll/begin",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"x-forwarded-proto", b"https")],
+            "client": (peer, 43120),
+            "server": ("vault.test", 443),
+        }
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            return None
+
+        await middleware(scope, receive, send)
+        return seen["ok"]
+
+    assert asyncio.run(observed_tls("172.18.0.9")) is True
+    assert asyncio.run(observed_tls("127.0.0.1")) is True
+    assert asyncio.run(observed_tls("198.51.100.9")) is False
+
+
+def test_begin_accepts_https_asgi_scheme(tmp_path, monkeypatch):
+    """When the ASGI scheme is already https, enrollment proceeds past TLS gate."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", _FAKE_BOT_TOKEN)
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USERS", _OWNER)
+    monkeypatch.setattr(
+        "agent.vault_telegram_enrollment._cfg_section",
+        lambda: {
+            "enabled": True,
+            "public_origin": _PUBLIC,
+            "init_data_max_age_seconds": 300,
+            "challenge_ttl_seconds": 300,
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.web_routers.vault_enrollment._section_int",
+        lambda key, default: default,
+    )
+    clear_challenges_for_tests()
+    app = FastAPI()
+    app.include_router(ve.router)
+
+    # Starlette TestClient defaults to http://; force https base URL.
+    client = TestClient(app, base_url="https://vault.test")
+    init = _init()
+    resp = client.post(
+        "/api/vault/enroll/begin",
+        headers={**_headers(), "X-Telegram-Init-Data": init},
+        json={"init_data": init},
+    )
+    assert resp.status_code == 200
+    assert "challenge_id" in resp.json()
+    clear_challenges_for_tests()
