@@ -105,7 +105,49 @@ vault:
     service_account_token_env: OP_SERVICE_ACCOUNT_TOKEN
   bitwarden:
     enabled: false
+  # Telegram Mini App enrollment (OFF by default). See § Telegram below.
+  telegram_enrollment:
+    enabled: false
+    public_origin: ""       # https://host[:port] only — must match BotFather Mini App domain
+    init_data_max_age_seconds: 300
+    challenge_ttl_seconds: 300
 ```
+
+## Telegram: add a login from a private chat
+
+Never type passwords into Telegram. When every prerequisite below is set, `/vault-add`
+in a **private DM** with your bot opens a Telegram Mini App form. You enter site,
+label, identifier, and password there; the page POSTs them over HTTPS straight to
+your Hermes dashboard. Telegram chat / Bot API updates carry only a non-secret
+status line afterward (saved / failed + optional label).
+
+**Prerequisites (feature stays disabled until all are present):**
+
+1. `vault.telegram_enrollment.enabled: true`
+2. `vault.telegram_enrollment.public_origin: https://your-public-host` (no path)
+3. `TELEGRAM_BOT_TOKEN` and non-empty `TELEGRAM_ALLOWED_USERS` in the profile `.env`
+4. Hermes **dashboard** listening and reachable at that HTTPS origin (TLS terminator
+   or tunnel in front of `hermes dashboard` / `hermes serve`)
+5. BotFather Mini App / domain configured for the same host; Web App URL
+   `https://your-public-host/vault/enroll`
+
+**Threat boundaries**
+
+| Path | What may carry secrets |
+|---|---|
+| Mini App page memory → `POST /api/vault/enroll` (HTTPS) | password, identifier |
+| Existing local vault (`vault.json.enc`) | encrypted at rest |
+| Telegram message / `callback_data` / `WebApp.sendData` / logs / model | **never** |
+
+Server checks: private-chat / owner allowlist, HMAC validation of WebApp `initData`
+(with freshness), single-use enrollment challenge, TLS + strict Host/Origin vs
+`public_origin`. `initDataUnsafe` and client-supplied user IDs are ignored.
+
+**Infrastructure you must provide:** a stable public HTTPS URL to the dashboard.
+A loopback-only desktop install cannot satisfy Telegram Mini App requirements without
+a TLS reverse proxy or tunnel — Hermes does not auto-deploy or configure BotFather.
+Without that host/config change, leave the feature disabled and keep using Desktop /
+`hermes vault add`.
 
 ## What this does and does not guarantee
 
@@ -113,10 +155,12 @@ vault:
 tool results, logs, the session database, or the CLI arguments of any process.
 Fills happen over the supervised browser session's direct CDP socket and are
 refused unless the page origin exactly matches the saved origin, checked again
-inside the page immediately before the write.
+inside the page immediately before the write. Telegram enrollment (when enabled)
+never places credential values in Bot API updates.
 
 **Does not:** protect against the page itself. Once a password is typed into a
 site, that site (and any script it runs) has it, exactly as when you type it
 yourself. On a cloud browser backend the vendor's browser sees the page like any
 other. The origin binding is the guard against filling on the wrong site, not
-against a compromised right one.
+against a compromised right one. Telegram enrollment also does not remove the
+need for a correctly configured public HTTPS origin and BotFather domain.

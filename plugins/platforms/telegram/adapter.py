@@ -146,6 +146,10 @@ try:
         from telegram import LinkPreviewOptions
     except ImportError:
         LinkPreviewOptions = None
+    try:
+        from telegram import WebAppInfo
+    except ImportError:
+        WebAppInfo = None
     from telegram.ext import (
         Application, CommandHandler, CallbackQueryHandler, InlineQueryHandler, MessageHandler as TelegramMessageHandler,
         ContextTypes, TypeHandler, filters)
@@ -156,7 +160,7 @@ except ImportError:
     TELEGRAM_AVAILABLE = False
     Update = Bot = Message = InlineKeyboardButton = InlineKeyboardMarkup = Application = Any
     CommandHandler = CallbackQueryHandler = InlineQueryHandler = TypeHandler = TelegramMessageHandler = HTTPXRequest = Any
-    LinkPreviewOptions = filters = ParseMode = ChatType = None
+    LinkPreviewOptions = WebAppInfo = filters = ParseMode = ChatType = None
 
     # Mock so ContextTypes.DEFAULT_TYPE annotations don't crash class definition without the lib.
     class _MockContextTypes:
@@ -343,7 +347,7 @@ def check_telegram_requirements() -> bool:
     so the adapter's class-level type aliases get rebound.
     """
     global TELEGRAM_AVAILABLE, Update, Bot, Message, InlineKeyboardButton
-    global InlineKeyboardMarkup, LinkPreviewOptions, Application
+    global InlineKeyboardMarkup, LinkPreviewOptions, WebAppInfo, Application
     global CommandHandler, CallbackQueryHandler, InlineQueryHandler, TelegramMessageHandler
     global ContextTypes, filters, ParseMode, ChatType, HTTPXRequest, TypeHandler
     if TELEGRAM_AVAILABLE:
@@ -360,6 +364,7 @@ def check_telegram_requirements() -> bool:
         Update, Bot, Message, InlineKeyboardButton, InlineKeyboardMarkup = (
             getattr(_tg, n) for n in ("Update", "Bot", "Message", "InlineKeyboardButton", "InlineKeyboardMarkup"))
         LinkPreviewOptions = getattr(_tg, "LinkPreviewOptions", None)
+        WebAppInfo = getattr(_tg, "WebAppInfo", None)
         Application, CommandHandler, CallbackQueryHandler, InlineQueryHandler, TelegramMessageHandler = (
             getattr(_ext, n) for n in ("Application", "CommandHandler", "CallbackQueryHandler", "InlineQueryHandler", "MessageHandler"))
         ContextTypes, filters, TypeHandler = _ext.ContextTypes, _ext.filters, _ext.TypeHandler
@@ -4335,6 +4340,26 @@ class TelegramAdapter(BasePlatformAdapter):
             return text, keyboard, None
         return await self._send_prompt(
             "send_update_prompt", chat_id, metadata, build, thread_id=self._metadata_thread_id(metadata), reply_to_mode=self._reply_to_mode)
+
+    async def send_vault_enroll_prompt(
+        self, chat_id: str, enroll_url: str, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        """Open the HTTPS Mini App form for vault login enrollment (no secrets in callback_data)."""
+        if WebAppInfo is None:
+            return SendResult(success=False, error="WebAppInfo unavailable")
+        if not (enroll_url or "").startswith("https://"):
+            return SendResult(success=False, error="enroll_url must be https")
+
+        def build():
+            text = self.format_message(
+                "🔐 *Add a website login*\n\n"
+                "Tap below to open a private form. Your password is typed only there and "
+                "sent directly to Hermes over HTTPS — never through this chat.")
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Open secure form", web_app=WebAppInfo(url=enroll_url))]])
+            return text, keyboard, None
+        return await self._send_prompt(
+            "send_vault_enroll_prompt", chat_id, metadata, build,
+            thread_id=self._metadata_thread_id(metadata), reply_to_mode=self._reply_to_mode)
 
     # Template attrs for the shared _format_exec_approval core (HTML mode).
     _EA_HEADER = f"⚠️ <b>{EA_HEADER_TEXT}</b>\n\n"

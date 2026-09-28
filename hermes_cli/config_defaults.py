@@ -2592,6 +2592,15 @@ DEFAULT_CONFIG = {
             "enabled": True,        # `bw` CLI (Password Manager, not Secrets Manager); run `bw login` once first.
             "binary_path": "",      # absolute path to bw; empty = PATH.
         },
+        # Telegram Mini App → local encrypted vault (login items only). OFF until every
+        # prerequisite is set: enabled=true, https public_origin, TELEGRAM_BOT_TOKEN,
+        # TELEGRAM_ALLOWED_USERS. Credentials never transit Telegram chat/Bot API.
+        "telegram_enrollment": {
+            "enabled": False,
+            "public_origin": "",  # https://host[:port] — must match BotFather Mini App domain + Host/Origin
+            "init_data_max_age_seconds": 300,
+            "challenge_ttl_seconds": 300,
+        },
     },
     "secrets": {
         # Optional ordering of enabled sources (e.g. [onepassword, bitwarden]); default registration

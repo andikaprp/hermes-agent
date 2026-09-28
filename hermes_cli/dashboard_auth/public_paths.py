@@ -24,4 +24,10 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # Chronos managed-cron fire webhook (NAS -> agent). NOT cookie-gated: it
     # carries its own short-lived NAS-minted JWT (purpose=cron_fire), which the
     # handler verifies — the JWT, not this allowlist, is the security boundary.
-    "/api/cron/fire"})
+    "/api/cron/fire",
+    # Telegram Mini App vault enrollment. NOT cookie-gated: handlers verify
+    # Telegram WebApp initData (HMAC with bot token) + a single-use challenge.
+    # Credential values never appear in Bot API updates — only on this HTTPS POST.
+    "/api/vault/enroll/begin",
+    "/api/vault/enroll",
+})
